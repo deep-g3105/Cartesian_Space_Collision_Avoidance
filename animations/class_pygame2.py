@@ -18,7 +18,7 @@ clock = pygame.time.Clock()
 font = pygame.font.SysFont("Arial", 18)
 
 # --- Simulation Parameters ---
-rho = 10.0  
+rho = 1.0  
 safety_eta = 1.0
 show_vectors = True
 
@@ -40,7 +40,7 @@ def grad_gamma_circle(x, center, radius):
 avoid = ModulationAvoider(
     gamma=lambda x: 1.0, 
     grad_gamma=lambda x: np.array([1.0, 0.0]), 
-    rho=rho, safety_eta=safety_eta, tail_effect=False
+    rho=rho, safety_eta=safety_eta, tail_effect=True
 )
 
 # --- Dynamical System Functions ---        
