@@ -44,15 +44,15 @@ class ModulationAvoider:
         assert d == self.dim, "x dimension mismatch"
 
         # Safety-inflated modulation anchor
-        x_tilde_safe = x_tilde / self.safety_eta
-        M = self.M(x_tilde_safe, f=f)
+        # x_tilde_safe = x_tilde / self.safety_eta
+        M = self.M(x_tilde, f=f)
         dx_dt = M.dot(f)
 
         # Enforce impenetrability
-        n = self._get_normal(x_tilde_safe)
+        n = self._get_normal(x_tilde)
         n_unit = n / (np.linalg.norm(n) + _EPS)
 
-        gamma_val = self.gamma(x_tilde_safe)
+        gamma_val = self.gamma(x_tilde)
 
         if gamma_val <= 1.0:
             normal_vel = float(n_unit.dot(dx_dt))
@@ -103,7 +103,10 @@ class ModulationAvoider:
         return E
 
     def D(self, x_tilde: np.ndarray, f: Optional[np.ndarray] = None) -> np.ndarray:
-        gamma_val = abs(float(self.gamma(x_tilde))) + _EPS
+        gamma_raw = abs(float(self.gamma(x_tilde))) + _EPS
+        
+        #Inflate obstacle boundary
+        gamma_val = gamma_raw * self.safety_eta
         d = x_tilde.shape[0]
 
         denom = gamma_val ** (1.0 / self.rho)

@@ -24,7 +24,7 @@ font = pygame.font.SysFont("Arial", 18)
 # Simulation Parameters
 # ---------------------------------------------------------------------
 rho = 1.0
-safety_eta = 1.0
+safety_eta = 0.75
 show_vectors = True
 
 # ---------------------------------------------------------------------
@@ -55,7 +55,7 @@ avoid = ModulationAvoider(
     grad_gamma=lambda x: np.array([1.0, 0.0]),
     rho=rho,
     safety_eta=safety_eta,
-    tail_effect=True
+    tail_effect=False
 )
 
 def get_nominal_velocity(position, goal):
@@ -97,7 +97,7 @@ def main():
 
     # Obstacles now have axes (a, b) and an angle [cite: 157]
     obstacles = [
-        {"pos": np.array([350.0, 300.0]), "axes": [80.0, 40.0], "angle": 0.0},
+        {"pos": np.array([350.0, 300.0]), "axes": [180.0, 40.0], "angle": 0.0},
         {"pos": np.array([600.0, 400.0]), "axes": [100.0, 50.0], "angle": math.radians(45)},
     ]
 
@@ -152,7 +152,7 @@ def main():
 
         # ---------------- Simulation ----------------
         v_nom = get_nominal_velocity(robot_pos, goal_pos)
-        speed = 220.0
+        speed = 100.0
         if np.linalg.norm(v_nom) > 0:
             v_nom = (v_nom / np.linalg.norm(v_nom)) * speed
 
