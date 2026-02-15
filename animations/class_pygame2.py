@@ -1,6 +1,6 @@
 import pygame
 import numpy as np
-from modulation.class_1 import ModulationAvoider   # <-- IMPORT YOUR CLASS
+from modulation.class_working import ModulationAvoider   # <-- IMPORT YOUR CLASS
 
 # --- Constants & Setup ---
 WIDTH, HEIGHT = 1080, 720

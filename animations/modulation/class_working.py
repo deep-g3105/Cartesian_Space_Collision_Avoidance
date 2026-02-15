@@ -5,7 +5,7 @@ _EPS = 1e-9
 
 
 class ModulationAvoider:
-    
+
     def __init__(
         self,
         gamma: Callable[[np.ndarray], float],
@@ -13,7 +13,7 @@ class ModulationAvoider:
         dim: Optional[int] = None,
         rho: float = 1.0,
         safety_eta: float = 1.0,
-        tail_effect: bool = False,
+        tail_effect: bool = True,
         lambda_min: float = -10.0,
         lambda_max_factor: float = 100.0,
     ):
@@ -30,6 +30,7 @@ class ModulationAvoider:
         self.dim = dim
 
     # ---------------------- Public API ----------------------
+
     def modulate(self, x: np.ndarray, x_tilde: np.ndarray, f: np.ndarray) -> np.ndarray:
         """Compute modulated velocity dx_dt = M(x_tilde) f(x)."""
 
@@ -43,7 +44,7 @@ class ModulationAvoider:
         assert d == self.dim, "x dimension mismatch"
 
         # Safety-inflated modulation anchor
-        x_tilde_safe = x_tilde/self.safety_eta 
+        x_tilde_safe = x_tilde / self.safety_eta
         M = self.M(x_tilde_safe, f=f)
         dx_dt = M.dot(f)
 
@@ -53,7 +54,7 @@ class ModulationAvoider:
 
         gamma_val = self.gamma(x_tilde_safe)
 
-        if gamma_val <= 1.0 :
+        if gamma_val <= 1.0:
             normal_vel = float(n_unit.dot(dx_dt))
             if normal_vel < 0:
                 dx_dt = dx_dt - normal_vel * n_unit
@@ -79,7 +80,8 @@ class ModulationAvoider:
 
         tangents = []
         for i in range(d):
-            ei = np.zeros(d); ei[i] = 1.0
+            ei = np.zeros(d)
+            ei[i] = 1.0
             vi = ei - np.dot(ei, n_unit) * n_unit
 
             for t in tangents:
@@ -121,6 +123,7 @@ class ModulationAvoider:
         return np.diag([lam_n] + [lam_tau] * (d - 1))
 
     # ---------------------- Helpers ----------------------
+
     def _get_normal(self, x_tilde: np.ndarray) -> np.ndarray:
         n = np.asarray(self.grad_gamma(x_tilde), float)
         if n.ndim != 1 or n.shape[0] != x_tilde.shape[0]:
@@ -128,6 +131,7 @@ class ModulationAvoider:
         return n
 
     # ---------------------- Static Utility Methods ----------------------
+
     @staticmethod
     def gamma_sphere(x: np.ndarray, center: np.ndarray, radius: float) -> float:
         return float(np.linalg.norm(x - center) / (radius + _EPS))
@@ -141,7 +145,7 @@ class ModulationAvoider:
     def gamma_ellipsoid(x: np.ndarray, center: np.ndarray, A: np.ndarray) -> float:
         v = x - center
         return float(np.sqrt(np.dot(v, A.dot(v)) + _EPS))
-
+    
     @staticmethod
     def grad_gamma_ellipsoid(x: np.ndarray, center: np.ndarray, A: np.ndarray) -> np.ndarray:
         v = x - center

@@ -1,6 +1,6 @@
 import pygame
 import numpy as np
-from modulation.class_1 import ModulationAvoider
+from modulation.class_working import ModulationAvoider
 
 # ---------------------------------------------------------------------
 # Constants & Setup
