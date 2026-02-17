@@ -58,7 +58,7 @@ def screen_to_world(mouse_pos):
 # Ellipsoid Parameters
 # -------------------------------------------------------
 rho = 1.0
-safety_eta = 1.0
+safety_eta = 0.5
 show_vectors = True
 
 ellipsoid_center = np.array([0.0, 0.0, 0.0])
@@ -100,7 +100,7 @@ def nominal_velocity(x, goal):
     n = np.linalg.norm(v)
     if n < 1e-6:
         return np.zeros(3)
-    return v / n * 200.0
+    return v / n * 50.0
 
 # -------------------------------------------------------
 # Interaction Flags
