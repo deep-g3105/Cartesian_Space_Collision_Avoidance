@@ -58,7 +58,7 @@ def screen_to_world(mouse_pos):
 # Ellipsoid Parameters
 # -------------------------------------------------------
 rho = 1.0
-safety_eta = 0.5
+safety_eta = 0.75
 show_vectors = True
 
 ellipsoid_center = np.array([0.0, 0.0, 0.0])

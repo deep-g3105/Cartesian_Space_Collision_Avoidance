@@ -18,8 +18,8 @@ clock = pygame.time.Clock()
 font = pygame.font.SysFont("Arial", 18)
 
 # --- Simulation Parameters ---
-rho = 1.0  
-safety_eta = 1.0
+rho = 1.0
+safety_eta = 0.5
 show_vectors = True
 
 # -----------------------------------------------------------------------------
@@ -61,15 +61,15 @@ def compute_modulated_velocity(position, velocity_nominal, obs_pos, obs_radius):
     """
 
     # Update gamma + gradient functions for the current obstacle
-    avoid.gamma = lambda x: gamma_circle(x, obs_pos, obs_radius)
-    avoid.grad_gamma = lambda x: grad_gamma_circle(x, obs_pos, obs_radius)
+    avoid.gamma = lambda x: gamma_circle(x, center=np.zeros(2), radius=obs_radius)
+    avoid.grad_gamma = lambda x: grad_gamma_circle(x, center=np.zeros(2), radius=obs_radius)
     avoid.rho = rho
 
     # The class API: v_mod = modulate(x, x_tilde, f)
     # For circular obstacle, x_tilde = x - center
     x_tilde = position - obs_pos
 
-    v_mod = avoid.modulate(position, position, velocity_nominal)
+    v_mod = avoid.modulate(position, x_tilde, velocity_nominal)
 
     # also return gamma for UI display
     gamma_val = avoid.gamma(x_tilde)
