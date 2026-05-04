@@ -1,1 +1,1 @@
-# Inter-Arm-and-Self-Collision-Avoidance-in-Dynamical-Systems-Based-Approach
+# Carstesian Space Collision Avoidance
