@@ -1,156 +1,156 @@
-## Mathematical Foundations
+---
 
-This repository implements collision avoidance in Cartesian space using modulation-based approaches. The core idea is to modulate the robot's velocity or trajectory in the presence of obstacles, ensuring smooth and safe navigation.
+> **Cartesian Space Collision Avoidance**  
+> Designed for robotic manipulators to navigate safely around obstacles in Cartesian space using modulation-based dynamical systems.
 
-### Core Concepts
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
+[![Status](https://img.shields.io/badge/Status-Active-success.svg)]()
 
-- **Obstacle Modulation:** The robot's desired velocity $\dot{x}_d$ is modulated by a matrix $M(x)$ that depends on the robot's position relative to obstacles:
+---
 
-	$$
-	\dot{x}_{mod} = M(x) \cdot \dot{x}_d
-	$$
-
-- **Modulation Matrix:** $M(x)$ is constructed such that it slows down or redirects the robot as it approaches obstacles, based on the obstacle's geometry (circle, ellipse, star-shaped, etc.).
-
-- **Dynamical Systems:** The framework supports both kinematic and dynamic systems, and can be extended to multiple obstacles and higher dimensions.
-
-### References
-
-- [Dynamical Systems Based Obstacle Avoidance](https://ieeexplore.ieee.org/document/6630914)
-- [Nonlinear Modulation for Obstacle Avoidance](https://ieeexplore.ieee.org/document/6630914)
-
-### Visual Examples
-
-Below are example animations (GIFs) demonstrating the algorithms. Add your GIFs/images to the `media/` folder and update the links as needed.
-
-<div style="display: flex; gap: 24px;">
-	<div style="border: 2px solid #888; border-radius: 8px; padding: 8px; text-align: center; width: 48%;">
-		<strong>2D Circle Obstacle Avoidance</strong><br>
-		<img src="media/2d_circle.gif" alt="2D Circle Obstacle" style="max-width: 100%; height: auto;">
-	</div>
-	<div style="border: 2px solid #888; border-radius: 8px; padding: 8px; text-align: center; width: 48%;">
-		<strong>2D Star-Shaped Obstacle Avoidance</strong><br>
-		<img src="media/2d_star.gif" alt="2D Star Obstacle" style="max-width: 100%; height: auto;">
-	</div>
+<!-- ============================================================
+     BANNER IMAGE PLACEHOLDER
+================================================================ -->
+<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 50px; text-align: center; width: 100%; max-width: 800px; margin: 0 auto; background-color: #f9f9f9; color: #555;">
+  <strong>[Placeholder: Banner Image]</strong><br>
+  <em>Showcase image of the robot setup or collision avoidance simulation</em>
 </div>
 
+---
 
-<br/>
+<!-- ============================================================
+     VISUAL EXAMPLES
+================================================================ -->
+<div align="center">
 
-<div style="display: flex; gap: 24px;">
-	<div style="border: 2px solid #888; border-radius: 8px; padding: 8px; text-align: center; width: 48%;">
-		<strong>3D Spherical Obstacle Avoidance</strong><br>
-		<img src="media/3d_sphere.gif" alt="3D Spherical Obstacle" style="max-width: 100%; height: auto;">
-	</div>
-	<div style="border: 2px solid #888; border-radius: 8px; padding: 8px; text-align: center; width: 48%;">
-		<strong>3D Star-Shaped Obstacle Avoidance</strong><br>
-		<img src="media/3d_star.gif" alt="3D Star Obstacle" style="max-width: 100%; height: auto;">
-	</div>
+| 2D Obstacle Avoidance | 3D Obstacle Avoidance |
+|:---:|:---:|
+| <div style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; width: 300px; background-color: #f9f9f9; color: #555;"><strong>[Placeholder: 2D Simulation]</strong><br><br><em>Visual of 2D Circle or Star Obstacle Avoidance</em></div> | <div style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; width: 300px; background-color: #f9f9f9; color: #555;"><strong>[Placeholder: 3D Simulation]</strong><br><br><em>Visual of 3D Spherical or Star Obstacle Avoidance</em></div> |
+
 </div>
 
-
-# Cartesian Space Collision Avoidance
+---
 
 ## Table of Contents
-
 - [Overview](#overview)
 - [Pipeline Summary](#pipeline-summary)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+- [Mathematical Foundations](#mathematical-foundations)
+  - [Real-Time Obstacle Avoidance](#real-time-obstacle-avoidance)
+  - [Reactive Pipeline and Parameters](#reactive-pipeline-and-parameters)
+  - [Multiple Obstacles](#multiple-obstacles)
 - [Directory Structure](#directory-structure)
 - [Usage](#usage)
 - [Troubleshooting](#troubleshooting)
 - [Acknowledgements](#acknowledgements)
 
-
-## Mathematical Foundations
-
-This repository implements collision avoidance in Cartesian space using modulation-based approaches. The core idea is to modulate the robot's velocity or trajectory in the presence of obstacles, ensuring smooth and safe navigation.
-
-### Core Concepts
-
-- **Obstacle Modulation:** The robot's desired velocity $\dot{x}_d$ is modulated by a matrix $M(x)$ that depends on the robot's position relative to obstacles:
-
-	$$
-	\dot{x}_{\text{mod}} = M(x) \, \dot{x}_d
-	$$
-
-- **Modulation Matrix:** $M(x)$ is constructed such that it slows down or redirects the robot as it approaches obstacles, based on the obstacle's geometry (circle, ellipse, star-shaped, etc.).
-
-- **Dynamical Systems:** The framework supports both kinematic and dynamic systems, and can be extended to multiple obstacles and higher dimensions.
-
-#### Example: Modulation Matrix for a Circular Obstacle
-
-For a circular obstacle centered at $x_o$ with radius $r$, the modulation matrix can be defined as:
-
-$$
-M(x) = E(x) D(x) E(x)^{-1}
-$$
-
-where $E(x)$ contains the orthonormal basis vectors (normal and tangential to the obstacle), and $D(x)$ is a diagonal matrix that scales the velocity along these directions.
-
-#### References
-
-- [Dynamical Systems Based Obstacle Avoidance](https://ieeexplore.ieee.org/document/6630914)
-- [Nonlinear Modulation for Obstacle Avoidance](https://ieeexplore.ieee.org/document/6630914)
-
-### Visual Examples
-
-Below are example animations (GIFs) demonstrating the algorithms. Add your GIFs/images to the `media/` folder and update the links as needed.
-
-#### 2D Circle Obstacle Avoidance
-![2D Circle Obstacle](media/2d_circle.gif)
-
-#### 2D Star-Shaped Obstacle Avoidance
-![2D Star Obstacle](media/2d_star.gif)
-
-#### 3D Spherical Obstacle Avoidance
-![3D Spherical Obstacle](media/3d_sphere.gif)
-
 ---
 
 ## Overview
-
 This repository provides a collection of algorithms and scripts for collision avoidance in Cartesian space for robotic manipulators. It includes 2D and 3D simulation environments, hardware integration scripts, and utilities for motion planning and obstacle avoidance. The codebase is modular, supporting different robot platforms and obstacle types, and is designed for both research and educational use.
 
 ---
 
 ## Pipeline Summary
-
-1. **Simulation**: Run 2D/3D animations to visualize and test collision avoidance algorithms.
-2. **Hardware Integration**: Deploy algorithms on real robots using provided scripts.
-3. **Utilities**: Use planners, velocity commanders, and gripper control modules for advanced tasks.
+| Stage | Tool/Category | Description |
+|---|---|---|
+| Simulation | 2D/3D Animations | Run animations to visualize and test collision avoidance algorithms |
+| Hardware Integration | Hardware Scripts | Deploy algorithms on real robots |
+| Utilities | Modules | Planners, velocity commanders, and gripper control |
 
 ---
 
 ## Prerequisites
+Before installation, ensure the following are available on your system:
 
-- Ubuntu Linux (tested on 20.04/22.04)
-- Python 3.10+ (see `env.yaml` and `env-hardware.yaml` for details)
-- [pygame](https://www.pygame.org/), [matplotlib](https://matplotlib.org/), [numpy](https://numpy.org/), [scipy](https://scipy.org/)
-- For hardware: [pyserial](https://pyserial.readthedocs.io/en/latest/)
+| Requirement | Version | Notes |
+|---|---|---|
+| Ubuntu | 20.04 / 22.04 | Tested environment |
+| Python | 3.10+ | Required for conda paths |
+| Visualization | - | pygame, matplotlib |
+| Scientific Math | - | numpy, scipy |
+| Hardware | - | pyserial |
 
 ---
 
 ## Installation
 
 1. Clone the repository:
-	```bash
-	git clone <this-repo-url>
-	cd Cartesian_Space_Collision_Avoidance
-	```
+```bash
+git clone <this-repo-url>
+cd Cartesian_Space_Collision_Avoidance
+```
+
 2. Create and activate a conda environment:
-	```bash
-	conda env create -f env.yaml
-	conda activate obstacle-avoidance
-	# For hardware:
-	conda env create -f env-hardware.yaml
-	conda activate obstacle-hw
-	```
-3. Install additional Python dependencies if needed:
-	```bash
-	pip install -r requirements.txt  # If such a file exists
-	```
+```bash
+conda env create -f env.yaml
+conda activate obstacle-avoidance
+
+# For hardware:
+conda env create -f env-hardware.yaml
+conda activate obstacle-hw
+```
+
+---
+
+## Mathematical Foundations
+
+This repository draws its obstacle avoidance theory and implementation from modulation-based approaches. 
+
+### Real-Time Obstacle Avoidance
+
+For an obstacle-centered state $\xi = x - x_o$, the modulated dynamics are:
+
+$$ \dot{\xi} = M(\xi)f(\xi) $$
+$$ M(\xi) = E(\xi)D(\xi)E(\xi)^{-1} $$
+
+with $\Gamma(\xi) = 1$ on the boundary and $\Gamma(\xi) > 1$ outside. The eigenvalues of the modulation matrix are formulated as:
+
+$$ \lambda_1 = 1 - \frac{1}{|\Gamma|^{1/\rho}}, \quad \lambda_{2..d} = 1 + \frac{1}{|\Gamma|^{1/\rho}} $$
+
+so the normal velocity is suppressed at the boundary and the flow is redirected tangentially.
+
+<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin: 20px auto; background-color: #f9f9f9; color: #555;">
+  <strong>[Placeholder: Modulation Flow Dynamics Image]</strong><br>
+  <em>e.g., Free-flow dynamics and obstacle-aware modulation around circular and polygonal obstacles</em>
+</div>
+
+### Reactive Pipeline and Parameters
+
+The online execution pipeline follows a clear sequence:
+
+**State Input $\xi$ $\rightarrow$ Distance Evaluation $\Gamma(\xi)$ $\rightarrow$ Compute Basis $E(\xi)$ $\rightarrow$ Parameter Modulation $(\rho, \eta)$ $\rightarrow$ Modulate $\dot{\xi} = M(\xi)f(\xi)$ $\rightarrow$ State Update $\xi_{t+1}$**
+
+<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin: 20px auto; background-color: #f9f9f9; color: #555;">
+  <strong>[Placeholder: Reactive Pipeline Flowchart]</strong><br>
+  <em>Flowchart demonstrating the step-by-step state update evaluation</em>
+</div>
+
+Safety inflation and reactivity are tuned with $\eta$ and $\rho$:
+- A **larger $\rho$** gives earlier deflection.
+- A **smaller $\eta$** increases clearance.
+
+### Multiple Obstacles
+
+For $K$ convex obstacles, the method is extended by weighting the influence of each obstacle:
+
+$$ \lambda_1^k = 1 - \frac{\omega_k}{|\Gamma_k(\xi_k)|^{1/\rho}}, \quad \lambda_{2..d}^k = 1 + \frac{\omega_k}{|\Gamma_k(\xi_k)|^{1/\rho}} $$
+
+where the weights $\omega_k$ are given by:
+
+$$ \omega_k = \prod_{i \neq k} \frac{\Gamma_i - 1}{(\Gamma_i - 1) + (\Gamma_k - 1)} $$
+
+The overall modulation matrix is the product of individual matrices:
+
+$$ \bar{M}(\xi) = \prod_{k=1}^K M_k(\xi) $$
+$$ \dot{\xi} = \bar{M}(\xi)f(\xi) $$
+
+<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin: 20px auto; background-color: #f9f9f9; color: #555;">
+  <strong>[Placeholder: Multiple Obstacles Image]</strong><br>
+  <em>Effect of obstacle inflation $\eta$ and reactivity parameter $\rho$ on modulated trajectories</em>
+</div>
 
 ---
 
@@ -184,7 +184,6 @@ Cartesian_Space_Collision_Avoidance/
 ## Usage
 
 ### 2D/3D Simulations
-
 Run any script in the `animations/` folder to visualize obstacle avoidance:
 
 ```bash
@@ -193,28 +192,28 @@ python animations/3d_spherical_1obs.py
 ```
 
 ### Hardware Control
-
-Scripts in `hardware/` allow you to run pick-and-place and obstacle avoidance on real robots (e.g., Franka, Heal):
+Scripts in `hardware/` allow you to run pick-and-place and obstacle avoidance on real robots:
 
 ```bash
 python hardware/pick_place_ik.py
 python hardware/pick_place_ik_ds_oa.py
 ```
 
-### Utilities
-
-Use planners and gripper commands from the `utils/` directory as needed in your projects.
-
 ---
 
 ## Troubleshooting
-
-- Ensure all dependencies are installed and the correct Python environment is activated.
-- For hardware, check serial connections and permissions.
-- For visualization, ensure your system supports `pygame` and `matplotlib`.
+| Problem | Likely Cause | Fix |
+|---|---|---|
+| Dependencies missing | Environment not activated | Run `conda activate obstacle-avoidance` |
+| Hardware connection fails | Serial permissions / connection | Check serial port and run `sudo chmod a+rw /dev/ttyUSB0` |
+| Visualization errors | System missing libraries | Ensure `pygame` and `matplotlib` are installed correctly |
 
 ---
 
 ## Acknowledgements
 
-This repository was developed at IIT Gandhinagar Robotics Lab. It draws inspiration from various open-source motion planning and robotics projects.
+This repository was developed at IIT Gandhinagar Robotics Lab. The theory and implementation of the Cartesian obstacle avoidance algorithm leverages concepts developed for dynamic robotic tasks.
+
+For more information on the obstacle avoidance theory used here, please refer to:
+- [Bimanual Dish-Washing Repository](https://github.com/Monisha-Kav/Bimanual-Dish-Washing) by Monisha Kavuri.
+- Original DS Avoidance frameworks and papers referenced in the modulation theory.
