@@ -67,7 +67,7 @@ Before installation, ensure the following are available on your system:
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Ubuntu | 20.04 / 22.04 | Tested environment |
+| Ubuntu | 22.04 | Tested environment |
 | Python | 3.10+ | Required for conda paths |
 | Visualization | - | pygame, matplotlib |
 | Scientific Math | - | numpy, scipy |
@@ -119,14 +119,17 @@ so the normal velocity is suppressed at the boundary and the flow is redirected 
 
 ### Reactive Pipeline and Parameters
 
-The online execution pipeline follows a clear sequence:
+Online execution follows: state input $\rightarrow$ distance evaluation $\Gamma(\tilde{\xi}) \rightarrow$ basis computation $E(\tilde{\xi}) \rightarrow$ modulation $M(\tilde{\xi})f(\xi)$.
 
-**State Input $\xi$ $\rightarrow$ Distance Evaluation $\Gamma(\xi)$ $\rightarrow$ Compute Basis $E(\xi)$ $\rightarrow$ Parameter Modulation $(\rho, \eta)$ $\rightarrow$ Modulate $\dot{\xi} = M(\xi)f(\xi)$ $\rightarrow$ State Update $\xi_{t+1}$**
-
-<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin: 20px auto; background-color: #f9f9f9; color: #555;">
-  <strong>[Placeholder: Reactive Pipeline Flowchart]</strong><br>
-  <em>Flowchart demonstrating the step-by-step state update evaluation</em>
-</div>
+```mermaid
+graph TD
+    classDef default fill:#ffffff,stroke:#3333ff,stroke-width:2px,color:#000000,font-family:sans-serif;
+    A["State Input ξ"] --> B["Distance Evaluation Γ(ξ̃)"]
+    B --> C["Compute Basis E(ξ̃)"]
+    C --> D["Parameter Modulation (ρ, η)"]
+    D --> E["Modulate ξ̇ = M(ξ̃)f(ξ)"]
+    E --> F["State Update ξ_t+1"]
+```
 
 Safety inflation and reactivity are tuned with $\eta$ and $\rho$:
 - A **larger $\rho$** gives earlier deflection.
@@ -214,6 +217,4 @@ python hardware/pick_place_ik_ds_oa.py
 
 This repository was developed at IIT Gandhinagar Robotics Lab. The theory and implementation of the Cartesian obstacle avoidance algorithm leverages concepts developed for dynamic robotic tasks.
 
-For more information on the obstacle avoidance theory used here, please refer to:
-- [Bimanual Dish-Washing Repository](https://github.com/Monisha-Kav/Bimanual-Dish-Washing) by Monisha Kavuri.
-- Original DS Avoidance frameworks and papers referenced in the modulation theory.
+

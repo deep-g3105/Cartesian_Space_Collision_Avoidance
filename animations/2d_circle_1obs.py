@@ -19,7 +19,7 @@ font = pygame.font.SysFont("Arial", 18)
 
 # --- Simulation Parameters ---
 rho = 1.0
-safety_eta = 0.5
+safety_eta = 1.0
 show_vectors = True
 
 # -----------------------------------------------------------------------------
