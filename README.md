@@ -1,4 +1,4 @@
----
+
 
 > **Cartesian Space Collision Avoidance**  
 > Designed for robotic manipulators to navigate safely around obstacles in Cartesian space using modulation-based dynamical systems.
