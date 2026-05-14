@@ -12,23 +12,12 @@
 <!-- ============================================================
      BANNER IMAGE PLACEHOLDER
 ================================================================ -->
-<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 50px; text-align: center; width: 100%; max-width: 800px; margin: 0 auto; background-color: #f9f9f9; color: #555;">
-  <strong>[Placeholder: Banner Image]</strong><br>
-  <em>Showcase image of the robot setup or collision avoidance simulation</em>
-</div>
-
----
-
-<!-- ============================================================
-     VISUAL EXAMPLES
-================================================================ -->
 <div align="center">
-
-| 2D Obstacle Avoidance | 3D Obstacle Avoidance |
-|:---:|:---:|
-| <div style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; width: 300px; background-color: #f9f9f9; color: #555;"><strong>[Placeholder: 2D Simulation]</strong><br><br><em>Visual of 2D Circle or Star Obstacle Avoidance</em></div> | <div style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; width: 300px; background-color: #f9f9f9; color: #555;"><strong>[Placeholder: 3D Simulation]</strong><br><br><em>Visual of 3D Spherical or Star Obstacle Avoidance</em></div> |
-
+  <img src="media/oa_banner.gif" alt="Cartesian Space Collision Avoidance Banner" width="600" style="border-radius: 8px;">
 </div>
+
+
+
 
 ---
 
@@ -50,6 +39,18 @@
 
 ## Overview
 This repository provides a collection of algorithms and scripts for collision avoidance in Cartesian space for robotic manipulators. It includes 2D and 3D simulation environments, hardware integration scripts, and utilities for motion planning and obstacle avoidance. The codebase is modular, supporting different robot platforms and obstacle types, and is designed for both research and educational use.
+
+---
+<!-- ============================================================
+     VISUAL EXAMPLES
+================================================================ -->
+<div align="center">
+
+| 2D Obstacle Avoidance | 3D Obstacle Avoidance |
+|:---:|:---:|
+| <img src="media/rho=1.0,%20eta%20=1.0.gif" alt="2D Simulation" width="300"> | <img src="media/sphere.gif" alt="3D Simulation" width="300"> |
+
+</div>
 
 ---
 
@@ -112,9 +113,13 @@ $$ \lambda_1 = 1 - \frac{1}{|\Gamma|^{1/\rho}}, \quad \lambda_{2..d} = 1 + \frac
 
 so the normal velocity is suppressed at the boundary and the flow is redirected tangentially.
 
-<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin: 20px auto; background-color: #f9f9f9; color: #555;">
-  <strong>[Placeholder: Modulation Flow Dynamics Image]</strong><br>
-  <em>e.g., Free-flow dynamics and obstacle-aware modulation around circular and polygonal obstacles</em>
+<div align="center">
+
+| Free Flow | Circular Obstacle | Polygonal Obstacle |
+|:---:|:---:|:---:|
+| <img src="media/free_flow.png" alt="Free Flow" width="250" height="190" style="width: 250px; height: 190px; object-fit: contain; border: 1px solid #888; border-radius: 8px; padding: 5px; background: #fff;"> | <img src="media/circle.png" alt="Circular Obstacle" width="250" height="190" style="width: 250px; height: 190px; object-fit: contain; border: 1px solid #888; border-radius: 8px; padding: 5px; background: #fff;"> | <img src="media/poly.png" alt="Polygonal Obstacle" width="250" height="190" style="width: 250px; height: 190px; object-fit: contain; border: 1px solid #888; border-radius: 8px; padding: 5px; background: #fff;"> |
+
+<em>Modulation Flow Dynamics: Free-flow dynamics and obstacle-aware modulation</em>
 </div>
 
 ### Reactive Pipeline and Parameters
@@ -150,8 +155,8 @@ The overall modulation matrix is the product of individual matrices:
 $$ \bar{M}(\xi) = \prod_{k=1}^K M_k(\xi) $$
 $$ \dot{\xi} = \bar{M}(\xi)f(\xi) $$
 
-<div align="center" style="border: 2px dashed #888; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin: 20px auto; background-color: #f9f9f9; color: #555;">
-  <strong>[Placeholder: Multiple Obstacles Image]</strong><br>
+<div align="center">
+  <img src="media/elliptical-multi.gif" alt="Multiple Obstacles" width="500"><br>
   <em>Effect of obstacle inflation $\eta$ and reactivity parameter $\rho$ on modulated trajectories</em>
 </div>
 
@@ -210,6 +215,23 @@ python hardware/pick_place_ik_ds_oa.py
 | Dependencies missing | Environment not activated | Run `conda activate obstacle-avoidance` |
 | Hardware connection fails | Serial permissions / connection | Check serial port and run `sudo chmod a+rw /dev/ttyUSB0` |
 | Visualization errors | System missing libraries | Ensure `pygame` and `matplotlib` are installed correctly |
+
+---
+
+## Limitations and Future Goals
+
+### Limitations
+- **Local Minima and Saddle Points**: The current collision avoidance algorithm can get trapped in local minima or saddle points when dealing with non-convex obstacles.
+
+### Future Goals
+- **Non-Convex Obstacles**: Implement strategies to overcome local minima and saddle points for complex, non-convex obstacles.
+- **Joint Space Collision Avoidance**: Extend the framework from Cartesian space to joint space to ensure the entire robot body safely avoids collisions.
+
+<div align="center">
+  <img src="media/star.gif" alt="Local Minima with Non-Convex Obstacles" width="500" style="border-radius: 8px;">
+  <br>
+  <em>Visualization of local minima or saddle points with non-convex obstacles</em>
+</div>
 
 ---
 
