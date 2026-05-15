@@ -65,12 +65,12 @@ def _sigmoid(
     return lam1 + (lam2 - lam1) / (1.0 + np.exp(-k * (gamma_val - mid)))
 
 
-def _lambda_n(gamma_val: float, d1: float = 1.0, d2: float = 10.0, k: float = 2.0) -> float:
+def _lambda_n(gamma_val: float, d1: float = 0.01, d2: float = 0.1, k: float = 2.0) -> float:
     
     return _sigmoid(gamma_val, d1, d2, lam1=0.0, lam2=1.0, k=k)
 
 
-def _lambda_tau(gamma_val: float, d1: float = 1.0, d2: float = 10.0, k: float = 2.0) -> float:
+def _lambda_tau(gamma_val: float, d1: float = 0.01, d2: float = 0.1, k: float = 2.0) -> float:
     
     return _sigmoid(gamma_val, d1, d2, lam1=2.0, lam2=1.0, k=k)
 
