@@ -73,7 +73,7 @@ class CartesianImpedanceController:
 
         # Orientation error
         q_current_inv = self.quaternion_inverse(quaternion_current)
-        q_error = self.quaternion_multiply(q_current_inv, self.quaternion_target)
+        q_error = self.quaternion_multiply(self.quaternion_target, q_current_inv)
         orientation_error = self.quaternion_to_rotation_vector(q_error)
 
         return np.concatenate((position_error, orientation_error))

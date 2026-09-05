@@ -149,7 +149,7 @@ class FR3:
                 if wrench.shape != (6,):
                         raise ValueError("Wrench must be a 6D vector.")
 
-                tau = J.T @ wrench
+                tau = J.T @ wrench + self.data.qfrc_bias[:7]  # Add Coriolis and gravity compensation
 
                 self.data.ctrl[:7] = tau
 
