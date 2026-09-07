@@ -3,8 +3,9 @@ import os
 import mujoco as mj
 import time
 
-from fr3_spawn import FR3
+from fr3_spawn import FR3, DSMotionGenerator
 from cartesian_impedance import CartesianImpedanceController
+
 
 robot = FR3()
 
@@ -21,23 +22,36 @@ home_position, home_quaternion, home_velocity = robot.get_cartesian_state()
 
 M = np.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])  # Mass matrix
 K = np.diag([100.0, 100.0, 100.0, 50.0, 50.0, 50.0])  # Stiffness matrix
-B = np.diag([5.0, 5.0, 5.0, 5.0, 5.0, 5.0])  # Damping matrix
+B = np.diag([50.0, 50.0, 50.0, 50.0, 50.0, 50.0])  # Damping matrix
+
 
 controller = CartesianImpedanceController(M, K, B)
 
-controller.set_target_pose(position=[0.5, 0.2, 0.5], quaternion=home_quaternion)  # Target position and orientation
+point_A = np.array([0.5, -0.4, 0.5])
+point_B = np.array([0.5,  0.4, 0.5])
+A_gain = np.diag([0.5, 0.5, 0.5]) 
 
-pose_error = controller.get_pose_error([0.5, 0.2, 0.5], home_quaternion)
+ds = DSMotionGenerator(point_A, point_B, A_gain, switch_threshold=0.03)
+
+# controller.set_target_pose(position=[0.5, 0.2, 0.5], quaternion=home_quaternion)  # Target position and orientation
+
+# pose_error = controller.get_pose_error([0.5, 0.2, 0.5], home_quaternion)
 
 
 with mj.viewer.launch_passive(robot.get_model(), robot.get_data()) as viewer:
     while viewer.is_running():
 
         position, quaternion, V = robot.get_cartesian_state()
+
+        x_dot, active_target = ds.step(position)
+        controller.set_target_pose(position=active_target, quaternion=home_quaternion)  # Keep orientation constant
+        controller.V0[:3] = x_dot  # Set desired linear velocity
+
         wrench = controller.compute_wrench(position, quaternion, V)
 
         J = robot.get_jacobian()
-        tau = J.T @ wrench + robot.data.qfrc_bias[:7]  # Add Coriolis and gravity compensation
+        Lambda = robot.get_operational_space_mass(J)
+        tau = J.T @ (Lambda @ wrench) + robot.data.qfrc_bias[:7]  # Add Coriolis and gravity compensation
 
         robot.data.ctrl[:7] = tau
 

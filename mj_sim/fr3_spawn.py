@@ -157,3 +157,43 @@ class FR3:
 
         def step(self):
                 mj.mj_step(self.model, self.data)
+
+        def get_operational_space_mass(self, J):
+                """
+                Compute the operational-space (Cartesian) mass matrix:
+                        Lambda = (J @ M^-1 @ J^T)^-1
+                where M is the robot's joint-space mass matrix at the current qpos.
+                """
+                nv = self.model.nv
+                M_full = np.zeros((nv, nv))
+                mj.mj_fullM(self.model, M_full, self.data.qM)
+                M_joint = M_full[:7, :7]
+
+                M_inv = np.linalg.inv(M_joint)
+                Lambda_inv = J @ M_inv @ J.T
+                Lambda = np.linalg.inv(Lambda_inv)
+                return Lambda
+
+
+class DSMotionGenerator:
+    
+
+    def __init__(self, point_a, point_b, A, switch_threshold=0.02):
+        self.point_a = np.asarray(point_a, dtype=float)
+        self.point_b = np.asarray(point_b, dtype=float)
+        self.A = np.asarray(A, dtype=float)          # 3x3 gain matrix
+        self.threshold = switch_threshold
+        self.active_target = self.point_b             # start heading toward B
+
+    def step(self, x_current):
+        x_current = np.asarray(x_current, dtype=float)
+
+        # Switch attractor once close enough to the current one
+        if np.linalg.norm(x_current - self.active_target) < self.threshold:
+            self.active_target = (
+                self.point_a if np.array_equal(self.active_target, self.point_b)
+                else self.point_b
+            )
+
+        x_dot = -self.A @ (x_current - self.active_target)
+        return x_dot, self.active_target
