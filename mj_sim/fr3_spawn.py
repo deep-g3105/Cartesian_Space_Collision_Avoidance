@@ -39,6 +39,7 @@ class FR3:
                 hand_spec = mj.MjSpec.from_file(hand_path)
 
                 fr3_spec.attach(hand_spec, site="attachment_site", prefix="fr3_hand_")
+                self.add_sphere_obstacle(fr3_spec, "obstacle1", np.array([0.5, 0.0, 0.7]))
 
                 self.model = fr3_spec.compile()
                 self.data = mj.MjData(self.model)
@@ -174,6 +175,17 @@ class FR3:
                 Lambda = np.linalg.inv(Lambda_inv)
                 return Lambda
 
+        def add_sphere_obstacle(self, spec, name, pos, radius=0.05, rgba=(1.0, 0.0, 0.0, 0.6)):
+                body = spec.worldbody.add_body(name=name, mocap=True, pos=pos)
+                body.add_geom(
+                        type=mj.mjtGeom.mjGEOM_SPHERE,
+                        size=[radius, 0, 0],
+                        rgba=rgba,
+                        contype=1,      # participates in collision detection
+                        conaffinity=1,
+                )
+                return body
+
 
 class DSMotionGenerator:
     
@@ -197,3 +209,61 @@ class DSMotionGenerator:
 
         x_dot = -self.A @ (x_current - self.active_target)
         return x_dot, self.active_target
+
+class FrankaGripper:
+        ACTUATOR_NAME = "fr3_hand_actuator8"
+
+        OPEN_CTRL = 255.0
+        CLOSE_CTRL = 0.0
+
+        def __init__(self, model, data) -> None:
+                self.model = model
+                self.data = data
+
+                self.actuator_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, self.ACTUATOR_NAME)
+
+                if self.actuator_id == -1:
+                        available = [mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_ACTUATOR, i) for i in range(self.model.nu)]
+                        raise ValueError(f"Actuator '{self.ACTUATOR_NAME}' not found. Available actuators: {available}")
+
+        def open(self) -> None:
+                self.data.ctrl[self.actuator_id] = self.OPEN_CTRL
+
+        def close(self) -> None:
+                self.data.ctrl[self.actuator_id] = self.CLOSE_CTRL
+
+        def set(self, value) -> None:
+               value = max(self.CLOSE_CTRL, min(self.OPEN_CTRL, value))  # Clamp value
+               self.data.ctrl[self.actuator_id] = value
+
+        def get_state(self) -> str:
+               value = self.data.ctrl[self.actuator_id]
+               if value >= self.OPEN_CTRL - 1:
+                      return "open"    
+               if value <= self.CLOSE_CTRL + 1:
+                      return "closed"
+               return "intermediate"
+
+class OscillatingObstacle:
+        def __init__(self, model, data, body_name, point_start, point_end, period=2.0):
+                self.model = model
+                self.data = data
+                self.point_start = np.asarray(point_start, dtype=float)
+                self.point_end = np.asarray(point_end, dtype=float)
+                self.period = period
+                
+                self.body_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, body_name)
+                if self.body_id == -1:
+                        raise ValueError(f"Body '{body_name}' not found in the model.")
+                
+                self.mocap_id = model.body_mocapid[self.body_id]
+                if self.mocap_id == -1:
+                        raise ValueError(f"Body '{body_name}' does not have an associated mocap body.")
+                
+                self._t = 0.0
+
+        def step(self, dt):
+               self._t += dt
+               phase = 0.5 * (1 - np.cos(2*np.pi * self._t / self.period))
+               pos = self.point_start + phase*(self.point_end - self.point_start)
+               self.data.mocap_pos[self.mocap_id] = pos
