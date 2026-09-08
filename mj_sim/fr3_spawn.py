@@ -29,7 +29,7 @@ import mujoco.viewer as viewer
 # Converting above code to class file
 
 class FR3:
-        def __init__(self):
+        def __init__(self, obstacles=None):
                 base_dir = os.path.dirname(__file__)
 
                 fr3_path = os.path.join(base_dir, "robot_files/franka_fr3/scene.xml")
@@ -39,7 +39,9 @@ class FR3:
                 hand_spec = mj.MjSpec.from_file(hand_path)
 
                 fr3_spec.attach(hand_spec, site="attachment_site", prefix="fr3_hand_")
-                self.add_sphere_obstacle(fr3_spec, "obstacle1", np.array([0.5, 0.0, 0.7]))
+                for obs in (obstacles or []):
+                       
+                        self.add_sphere_obstacle(fr3_spec, obs["name"], np.asarray(obs["pos"]), radius = obs.get("radius", 0.05))
 
                 self.model = fr3_spec.compile()
                 self.data = mj.MjData(self.model)
@@ -143,21 +145,21 @@ class FR3:
 
                 return position, quaternion, V
 
-        def apply_cartesian_impedance_torque(self, wrench, site_name="attachment_site"):
-                J = self.get_jacobian(site_name)
-                wrench = np.asarray(wrench, dtype=float)
+        # def apply_cartesian_impedance_torque(self, wrench, site_name="attachment_site"):
+        #         J = self.get_jacobian(site_name)
+        #         wrench = np.asarray(wrench, dtype=float)
 
-                if wrench.shape != (6,):
-                        raise ValueError("Wrench must be a 6D vector.")
+        #         if wrench.shape != (6,):
+        #                 raise ValueError("Wrench must be a 6D vector.")
 
-                tau = J.T @ wrench + self.data.qfrc_bias[:7]  # Add Coriolis and gravity compensation
+        #         tau = J.T @ wrench + self.data.qfrc_bias[:7]  # Add Coriolis and gravity compensation
 
-                self.data.ctrl[:7] = tau
+        #         self.data.ctrl[:7] = tau
 
-                return tau
+        #         return tau
 
-        def step(self):
-                mj.mj_step(self.model, self.data)
+        # def step(self):
+        #         mj.mj_step(self.model, self.data)
 
         def get_operational_space_mass(self, J):
                 """
@@ -267,3 +269,6 @@ class OscillatingObstacle:
                phase = 0.5 * (1 - np.cos(2*np.pi * self._t / self.period))
                pos = self.point_start + phase*(self.point_end - self.point_start)
                self.data.mocap_pos[self.mocap_id] = pos
+
+        def get_position(self):
+               return self.data.mocap_pos[self.mocap_id].copy()
