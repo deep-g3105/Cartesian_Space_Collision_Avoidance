@@ -4,7 +4,7 @@ import numpy as np
 import mujoco as mj
 import time
 
-from fr3_spawn import FR3, DSMotionGenerator, FrankaGripper, OscillatingObstacle
+from fr3_spawn import FR3, DSMotionGenerator, FrankaGripper, OscillatingObstacle, SinusoidalObstacle
 from cartesian_impedance import CartesianImpedanceController
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,12 +17,12 @@ M = np.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])  # Mass matrix
 K = np.diag([100.0, 100.0, 100.0, 50.0, 50.0, 50.0])  # Stiffness matrix
 B = np.diag([50.0, 50.0, 50.0, 50.0, 50.0, 50.0])  # Damping matrix
 
-point_A = np.array([0.5, -0.4, 0.5])
-point_B = np.array([0.5,  0.4, 0.5])
+point_A = np.array([0.6, -0.4, 0.5])
+point_B = np.array([0.6,  0.4, 0.5])
 A_gain = np.diag([1.0, 1.0, 1.0]) 
 
-obstacle_A = np.array([0.5, 0.4, 0.35])
-obstacle_B = np.array([0.5, -0.4, 0.35])
+obstacle_A = np.array([0.6, 0.4, 0.35])
+obstacle_B = np.array([0.6, -0.4, 0.35])
 obstacle_radius = 0.05
 
 robot = FR3(obstacles =[{"name":"obstacle1", "pos": obstacle_A, "radius": obstacle_radius}])
@@ -43,13 +43,20 @@ ds = DSMotionGenerator(point_A, point_B, A_gain, switch_threshold=0.025)
 
 gripper = FrankaGripper(robot.model, robot.data)
 
-obstacle = OscillatingObstacle(
-    robot.model, robot.data,
-    body_name="obstacle1",     # must match the name passed to add_sphere_obstacle
-    point_start=obstacle_A,
-    point_end=obstacle_B,
-    period=2.0,                  # seconds for a full up-down-up cycle
-)
+# obstacle = OscillatingObstacle(
+#     robot.model, robot.data,
+#     body_name="obstacle1",     # must match the name passed to add_sphere_obstacle
+#     point_start=obstacle_A,
+#     point_end=obstacle_B,
+#     period=6.0,                  # seconds for a full up-down-up cycle
+# )
+obstacle = SinusoidalObstacle(robot.model, robot.data, "obstacle1",
+                         center=[0.6, 0.0, 0.4],
+                         amplitude=[0.0, 0.2, 0.05],
+                         frequency=[0, 0.5, 1.0],
+                         phase=[0, 0, np.pi / 2])
+
+obstacle.set_params(frequency=0.5, amplitude=[0.1, 0.0, 0.1])
 
 def obstacle_gamma(x_tilde):
     return ModulationAvoider.gamma_sphere(x_tilde, np.zeros(3), obstacle_radius)
@@ -61,13 +68,16 @@ def obstacle_grad_gamma(x_tilde):
 avoider = ModulationAvoider(gamma = obstacle_gamma,
                             grad_gamma= obstacle_grad_gamma,
                             dim=3,
-                            rho = 3,
-                            safety_eta = 0.5)
+                            rho = 2.0,
+                            safety_eta = 0.2)
 
 # controller.set_target_pose(position=[0.5, 0.2, 0.5], quaternion=home_quaternion)  # Target position and orientation
 
 # pose_error = controller.get_pose_error([0.5, 0.2, 0.5], home_quaternion)
 
+dt = robot.model.opt.timestep
+p_obs_prev = obstacle.get_position().copy()
+gripper.open()   # optional: call once here instead of every tick
 
 with mj.viewer.launch_passive(robot.get_model(), robot.get_data()) as viewer:
     while viewer.is_running():
@@ -75,10 +85,14 @@ with mj.viewer.launch_passive(robot.get_model(), robot.get_data()) as viewer:
         position, quaternion, V = robot.get_cartesian_state()
 
         x_dot, active_target = ds.step(x_ref)
-        obstacle_center = obstacle.get_position()
-        x_tilde = x_ref - obstacle_center
-        x_dot = avoider.modulate(x_ref, x_tilde, x_dot)
-        x_ref =  x_ref + x_dot*robot.model.opt.timestep
+        p_obs = obstacle.get_position().copy()
+        v_obs = (p_obs - p_obs_prev) / dt
+        p_obs_prev = p_obs
+
+        x_tilde = x_ref - p_obs
+        v_obs = np.zeros(3)
+        x_dot = avoider.modulate(x_ref, x_tilde, x_dot, v_obs=v_obs)
+        x_ref = x_ref + x_dot * dt
         gripper.open()  # Open the gripper at the start of the motion
 
         controller.set_target_pose(position=x_ref, quaternion=home_quaternion)  # Keep orientation constant

@@ -31,12 +31,13 @@ class ModulationAvoider:
 
     # ---------------------- Public API ----------------------
 
-    def modulate(self, x: np.ndarray, x_tilde: np.ndarray, f: np.ndarray) -> np.ndarray:
+    def modulate(self, x: np.ndarray, x_tilde: np.ndarray, f: np.ndarray, v_obs: Optional[np.ndarray] = None) -> np.ndarray:
         """Compute modulated velocity dx_dt = M(x_tilde) f(x)."""
 
         x = np.asarray(x, float)
         x_tilde = np.asarray(x_tilde, float)
         f = np.asarray(f, float)
+        v_o = np.zeros_like(f) if v_obs is None else np.asarray(v_obs, float)
 
         d = x.shape[0]
         if self.dim is None:
@@ -45,21 +46,22 @@ class ModulationAvoider:
 
         # Safety-inflated modulation anchor
         # x_tilde_safe = x_tilde / self.safety_eta
-        M = self.M(x_tilde, f=f)
-        dx_dt = M.dot(f)
+        f_rel = f - v_o
+        M = self.M(x_tilde, f=f_rel)
+        dx_dt = M.dot(f_rel) + v_o
 
-        # Enforce impenetrability
-        x_tilde_safe = x_tilde * self.safety_eta
-        n = self._get_normal(x_tilde_safe)
-        n_unit = n / (np.linalg.norm(n) + _EPS)
+        # # Enforce impenetrability
+        # x_tilde_safe = x_tilde * self.safety_eta
+        # n = self._get_normal(x_tilde_safe)
+        # n_unit = n / (np.linalg.norm(n) + _EPS)
 
-        gamma_val = self.gamma(x_tilde)
-        effective_boundary = 1/self.safety_eta
+        # gamma_val = self.gamma(x_tilde)
+        # effective_boundary = 1/self.safety_eta
 
-        if gamma_val <= effective_boundary:
-            normal_vel = float(n_unit.dot(dx_dt))
-            if normal_vel < 0:
-                dx_dt = dx_dt - normal_vel * n_unit
+        # if gamma_val <= effective_boundary:
+        #     normal_vel = float(n_unit.dot(dx_dt))
+        #     if normal_vel < 0:
+        #         dx_dt = dx_dt - normal_vel * n_unit
 
         return dx_dt
 
@@ -76,34 +78,81 @@ class ModulationAvoider:
 
         return E.dot(D).dot(E_inv)
 
+    # def E(self, x_tilde: np.ndarray) -> np.ndarray:
+    #     n = self._get_normal(x_tilde)
+    #     d = n.shape[0]
+    #     n_unit = n / (np.linalg.norm(n) + _EPS)
+
+    #     _, _, Vt = np.linalg.svd(n_unit.reshape(1, -1), full_matrices=True)
+    #     tangents = Vt[1:, :]
+    #     tangents = tangents.T
+
+    #     # tangents = []
+    #     # for i in range(d):
+    #     #     ei = np.zeros(d)
+    #     #     ei[i] = 1.0
+    #     #     vi = ei - np.dot(ei, n_unit) * n_unit
+
+    #     #     for t in tangents:
+    #     #         vi = vi - np.dot(vi, t) * t
+
+    #     #     norm_vi = np.linalg.norm(vi)
+    #     #     if norm_vi > 1e-8:
+    #     #         tangents.append(vi / norm_vi)
+    #     #     if len(tangents) >= d - 1:
+    #     #         break
+
+    #     # if len(tangents) < d - 1:
+    #     #     rand_mat = np.random.randn(d, d)
+    #     #     Q, _ = np.linalg.qr(rand_mat)
+    #     #     tangents = [Q[:, i] for i in range(d) if abs(np.dot(Q[:, i], n_unit)) < 1 - 1e-3]
+    #     #     tangents = tangents[: max(0, d - 1)]
+
+    #     E = np.column_stack([n_unit] + tangents[: d - 1])
+    #     return E
+
+    #alternate 
     def E(self, x_tilde: np.ndarray) -> np.ndarray:
+
+
+        x_tilde = np.asarray(x_tilde, dtype=float)
+
+        # --------------------------------------------------
+        # 1. Get obstacle normal
+        # --------------------------------------------------
         n = self._get_normal(x_tilde)
+
         d = n.shape[0]
-        n_unit = n / (np.linalg.norm(n) + _EPS)
 
-        tangents = []
-        for i in range(d):
-            ei = np.zeros(d)
-            ei[i] = 1.0
-            vi = ei - np.dot(ei, n_unit) * n_unit
+        norm_n = np.linalg.norm(n)
 
-            for t in tangents:
-                vi = vi - np.dot(vi, t) * t
+        if norm_n < _EPS:
+            raise ValueError(
+                "Obstacle gradient is too small to define a normal."
+            )
 
-            norm_vi = np.linalg.norm(vi)
-            if norm_vi > 1e-8:
-                tangents.append(vi / norm_vi)
-            if len(tangents) >= d - 1:
-                break
+        n_unit = n / norm_n
 
-        if len(tangents) < d - 1:
-            rand_mat = np.random.randn(d, d)
-            Q, _ = np.linalg.qr(rand_mat)
-            tangents = [Q[:, i] for i in range(d) if abs(np.dot(Q[:, i], n_unit)) < 1 - 1e-3]
-            tangents = tangents[: max(0, d - 1)]
+        # --------------------------------------------------
+        # 2. Construct an orthonormal basis using QR
+        # --------------------------------------------------
+        #
+        # Start with the normal as the first column.
+        # Add arbitrary independent vectors and orthogonalize.
+        #
+        A = np.eye(d)
 
-        E = np.column_stack([n_unit] + tangents[: d - 1])
-        return E
+        # Put normal as first column
+        A[:, 0] = n_unit
+
+        # Gram-Schmidt / QR decomposition
+        Q, _ = np.linalg.qr(A)
+
+        # Make sure first column has the correct normal direction
+        if np.dot(Q[:, 0], n_unit) < 0:
+            Q[:, 0] *= -1
+
+        return Q
 
     def D(self, x_tilde: np.ndarray, f: Optional[np.ndarray] = None) -> np.ndarray:
         # gamma_raw = abs(float(self.gamma(x_tilde))) + _EPS

@@ -272,3 +272,79 @@ class OscillatingObstacle:
 
         def get_position(self):
                return self.data.mocap_pos[self.mocap_id].copy()
+
+class SinusoidalObstacle:
+        """
+        Moves a mocap body along a sinusoidal trajectory:
+
+                pos(t) = center + amplitude * sin(2*pi*frequency*t + phase)
+
+        applied per axis (x, y, z). Any of amplitude / frequency / phase can be
+        a scalar (applied to all axes) or a 3-vector (per axis).
+
+        Examples:
+                # 20 cm sweep along y at 0.5 Hz
+                SinusoidalObstacle(model, data, "obs1", center=[0.5, 0, 0.4],
+                                   amplitude=[0, 0.2, 0], frequency=0.5)
+
+                # circle in the x-y plane (90 deg phase offset between x and y)
+                SinusoidalObstacle(model, data, "obs1", center=[0.5, 0, 0.4],
+                                   amplitude=[0.1, 0.1, 0], frequency=0.3,
+                                   phase=[np.pi / 2, 0, 0])
+        """
+
+        def __init__(self, model, data, body_name, center,
+                     amplitude=(0.0, 0.1, 0.0), frequency=0.5, phase=0.0):
+                self.model = model
+                self.data = data
+
+                self.body_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, body_name)
+                if self.body_id == -1:
+                        raise ValueError(f"Body '{body_name}' not found in the model.")
+
+                self.mocap_id = model.body_mocapid[self.body_id]
+                if self.mocap_id == -1:
+                        raise ValueError(f"Body '{body_name}' is not a mocap body.")
+
+                self.set_params(center, amplitude, frequency, phase)
+                self._t = 0.0
+
+        @staticmethod
+        def _to_vec3(value, name):
+                arr = np.asarray(value, dtype=float)
+                if arr.ndim == 0:
+                        return np.full(3, float(arr))
+                if arr.shape != (3,):
+                        raise ValueError(f"{name} must be a scalar or a 3-vector.")
+                return arr
+
+        def set_params(self, center=None, amplitude=None, frequency=None, phase=None):
+                """Update any wave parameter at runtime (None = keep current)."""
+                if center is not None:
+                        self.center = self._to_vec3(center, "center")
+                if amplitude is not None:
+                        self.amplitude = self._to_vec3(amplitude, "amplitude")
+                if frequency is not None:
+                        self.frequency = self._to_vec3(frequency, "frequency")   # Hz
+                if phase is not None:
+                        self.phase = self._to_vec3(phase, "phase")               # rad
+
+        def _position_at(self, t):
+                omega = 2.0 * np.pi * self.frequency
+                return self.center + self.amplitude * np.sin(omega * t + self.phase)
+
+        def step(self, dt):
+                self._t += dt
+                self.data.mocap_pos[self.mocap_id] = self._position_at(self._t)
+
+        def get_position(self):
+                return self.data.mocap_pos[self.mocap_id].copy()
+
+        def get_velocity(self):
+                """Analytical velocity (useful for reactive avoidance)."""
+                omega = 2.0 * np.pi * self.frequency
+                return self.amplitude * omega * np.cos(omega * self._t + self.phase)
+
+        def reset(self, t=0.0):
+                self._t = t
+                self.data.mocap_pos[self.mocap_id] = self._position_at(t)
