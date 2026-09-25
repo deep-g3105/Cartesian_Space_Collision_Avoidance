@@ -1,298 +1,288 @@
 """
-modulation_math.py
-==================
-Pure mathematics for DS-based obstacle avoidance (Khansari-Billard 2012).
+modulation_class_v3.py
 
-No simulation loop, no hardware loop, no timing, no state integration.
-Call from your own simulation runner or hardware runner.
+Implements the modulation approach of:
+    L. Huber, A. Billard, J.-J. Slotine,
+    "Avoidance of Convex and Concave Obstacles With Convergence Ensured
+    Through Contraction", IEEE RA-L, 2019.
 
-Two classes
------------
-ModulationAvoider
-    Stateless.  All methods are pure functions of their inputs.
-    Call M(), E(), D(), modulate() at every control tick.
+Key departure from v2 (Khansari & Billard, 2012):
+    v2's E(x) uses the surface normal n(x) = grad(gamma)/|grad(gamma)| as
+    its FIRST column, and builds the tangent directions as the orthogonal
+    complement of that same normal -> E is fully orthonormal, but this
+    restricts the obstacle to be convex (star-shaped only if the reference
+    point is the centroid).
 
-SaddlePointEscaper
-    Stateful across ticks (tracks whether an escape is in progress).
-    Call update() at every control tick.
-    Returns (escape_velocity, is_escaping).
-    - escape_velocity is zeros when no escape is needed.
-    - is_escaping tells the caller to skip its normal DS command.
+    Huber decouples the two roles:
+      - the tangent directions e_1..e_{d-1} are still the orthogonal
+        complement of the gradient (the normal direction), so the boundary
+        is still respected locally,
+      - but the FIRST column of E is r(x) = (x - x_r)/||x - x_r||, the
+        direction from a chosen REFERENCE POINT x_r inside the obstacle,
+        not the local normal.
 
-Caller responsibilities
------------------------
-Simulation runner:
-    x = x + dt * (escape_vel if is_escaping else modulated_vel)
+    Because r(x) and the local normal need not be parallel, E(x) is in
+    general non-orthogonal but still invertible (as long as x_r is chosen
+    so every ray from x_r crosses the boundary exactly once, i.e. the
+    obstacle is *star-shaped* w.r.t. x_r). This one change is what makes
+    the method valid for non-convex, concave, star-shaped obstacles, and
+    (via the multi-obstacle interpolation below) for concave regions
+    formed by intersecting/unioned convex obstacles that share one common
+    reference point (Sec. IV-B / Theorem 3 of the paper).
 
-Hardware runner:
-    command(escape_vel if is_escaping else modulated_vel)
-    apply your own low-pass filtering, velocity limits, safety stops, etc.
+Contents:
+    HuberModulationAvoider   - single-obstacle modulation (Eqs. 4-8, 17-18)
+    MultiObstacleHuberAvoider- weighted magnitude + kappa-space direction
+                               interpolation for several obstacles (Eqs.
+                               11-16), required whenever a concave region
+                               is built from several convex pieces
+    Helper / utility functions:
+        numerical_gradient            - generic central-difference gradient
+        gamma_star_from_radius        \
+        grad_gamma_star_from_radius    } arbitrary star-shaped obstacle
+        radius_function_polygon_2d    / defined by a radius-vs-direction
+                                         function (supports concave shapes,
+                                         e.g. star polygons in 2D)
+        is_valid_reference_point      - sampling-based check that x_r sees
+                                         the boundary exactly once per ray
+        gamma_sphere / grad_gamma_sphere
+        gamma_ellipsoid / grad_gamma_ellipsoid
+        gamma_superellipsoid / grad_gamma_superellipsoid
+            (same convex primitives as v2, reused unchanged)
 
-See bottom of file for minimal usage examples.
+What I still need from you to finish wiring this to your setup:
+    1. How you represent obstacle geometry for the concave objects you
+       care about (mesh? polygon vertices? analytic radius function?) -
+       radius_function_polygon_2d only covers 2D polygons right now.
+    2. Whether obstacles move (HEAL/Franka links, human arms) - if so I
+       need their linear/angular velocity source so modulate_moving() can
+       be hooked into your control loop the same way v2's v_obs is today.
+    3. Confirm the reference-point selection strategy per obstacle (fixed
+       centroid vs. something you compute per obstacle instance) so
+       is_valid_reference_point can be wired into your obstacle setup code
+       as a sanity check.
 """
 
-from __future__ import annotations
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Sequence, Union
 import numpy as np
 
 _EPS = 1e-9
 
+RefPoint = Union[np.ndarray, Callable[[], np.ndarray]]
 
-# ============================================================
-# ModulationAvoider — stateless math
-# ============================================================
 
-class ModulationAvoider:
-    """
-    Computes the dynamic modulation matrix M(ξ̃) and the modulated
-    velocity ξ̇ = M(ξ̃) f(ξ) for a single convex obstacle.
+def _resolve_ref_point(ref: RefPoint) -> np.ndarray:
+    return np.asarray(ref(), float) if callable(ref) else np.asarray(ref, float)
 
-    All public methods are stateless — they depend only on their
-    arguments.  No integration, no timing, no side effects.
 
-    Parameters
-    ----------
-    gamma : callable (x_tilde) -> float
-        Obstacle function.  γ < 1 inside, γ = 1 on boundary, γ > 1 outside.
-        x_tilde = x - obstacle_center.
-    grad_gamma : callable (x_tilde) -> np.ndarray
-        Gradient of gamma w.r.t. x_tilde.  Must return shape (d,).
-    rho : float
-        Reactivity parameter ρ > 0.  Larger → deflects earlier / stronger.
-    safety_eta : float
-        Safety factor η ∈ (0, 1].  Inflates the obstacle.
-        η = 1 means no inflation.
-        The effective boundary seen by the robot is γ = 1/η.
-    tail_effect : bool
-        If True (default), remove the tail-effect correction:
-        λ₁ is set to 1 when the robot moves away from the obstacle,
-        so the trajectory is not bent after passing it.
-    lambda_min : float
-        Floor on λ₁ (normal eigenvalue).
-    lambda_max_factor : float
-        λ_τ is capped at 1 + lambda_max_factor.
+def _orthonormal_complement(unit_vec: np.ndarray) -> np.ndarray:
+    """Columns 1..d-1 of a QR-completed basis whose first column is unit_vec.
+    Returns only the d-1 complement columns (shape d x (d-1))."""
+    d = unit_vec.shape[0]
+    A = np.eye(d)
+    A[:, 0] = unit_vec
+    Q, _ = np.linalg.qr(A)
+    if np.dot(Q[:, 0], unit_vec) < 0:
+        Q[:, 0] *= -1
+    return Q[:, 1:]
+
+
+def numerical_gradient(func: Callable[[np.ndarray], float], x: np.ndarray, h: float = 1e-6) -> np.ndarray:
+    """Generic central-difference gradient. Use this for any gamma(x) whose
+    analytic gradient is inconvenient (e.g. ray-cast/polygon-based gammas)."""
+    x = np.asarray(x, float)
+    grad = np.zeros_like(x)
+    for i in range(x.shape[0]):
+        dx = np.zeros_like(x)
+        dx[i] = h
+        grad[i] = (func(x + dx) - func(x - dx)) / (2 * h)
+    return grad
+
+
+# ---------------------- Single obstacle ----------------------
+
+class HuberModulationAvoider:
+    """Single-obstacle modulation per Huber et al. 2019.
+
+    gamma / grad_gamma follow the same contract as in v2: gamma(x) -> float,
+    grad_gamma(x) -> (d,) vector, with gamma(x) = 1 on the boundary and
+    increasing away from the obstacle.
+
+    reference_point is the key new input: a point x_r strictly inside the
+    obstacle (or a zero-arg callable returning one, for a moving obstacle)
+    such that every ray from x_r crosses the boundary exactly once (star-
+    shaped condition, Sec. III-C / III-B). Use is_valid_reference_point to
+    check a candidate.
     """
 
     def __init__(
         self,
-        gamma       : Callable[[np.ndarray], float],
-        grad_gamma  : Callable[[np.ndarray], np.ndarray],
-        rho         : float = 1.0,
-        safety_eta  : float = 1.0,
-        tail_effect : bool  = True,
-        lambda_min  : float = -10.0,
-        lambda_max_factor : float = 100.0,
+        gamma: Callable[[np.ndarray], float],
+        grad_gamma: Callable[[np.ndarray], np.ndarray],
+        reference_point: RefPoint,
+        dim: Optional[int] = None,
+        rho: float = 1.0,
+        safety_eta: float = 1.0,
+        tail_effect: bool = True,
+        lambda_min: float = -10.0,
+        lambda_max_factor: float = 100.0,
     ):
-        assert rho > 0,             "rho must be > 0"
-        assert 0 < safety_eta <= 1, "safety_eta must be in (0, 1]"
+        assert rho > 0, "rho must be > 0"
+        assert 0 < safety_eta <= 1.0, "safety_eta must be in (0,1]"
 
-        self.gamma             = gamma
-        self.grad_gamma        = grad_gamma
-        self.rho               = float(rho)
-        self.safety_eta        = float(safety_eta)
-        self.tail_effect       = bool(tail_effect)
-        self.lambda_min        = float(lambda_min)
-        self.lambda_max_factor = float(lambda_max_factor)
+        self.gamma = gamma
+        self.grad_gamma = grad_gamma
+        self.reference_point = reference_point
+        self.rho = float(rho)
+        self.safety_eta = float(safety_eta)
+        self.tail_effect = bool(tail_effect)
+        self.lambda_min = lambda_min
+        self.lambda_max_factor = lambda_max_factor
+        self.dim = dim
 
-    # ----------------------------------------------------------
-    # Primary call: modulated velocity
-    # ----------------------------------------------------------
+    # ---------------------- Public API ----------------------
 
-    def modulate(
+    def modulate(self, x: np.ndarray, f: np.ndarray, v_obs: Optional[np.ndarray] = None) -> np.ndarray:
+        """Static-obstacle modulation: dx_dt = M(x)(f(x) - v_obs) + v_obs."""
+        x = np.asarray(x, float)
+        f = np.asarray(f, float)
+        v_o = np.zeros_like(f) if v_obs is None else np.asarray(v_obs, float)
+
+        d = x.shape[0]
+        if self.dim is None:
+            self.dim = d
+        assert d == self.dim, "x dimension mismatch"
+
+        f_rel = f - v_o
+        M = self.M(x, f=f_rel)
+        return M.dot(f_rel) + v_o
+
+    def modulate_moving(
         self,
-        x       : np.ndarray,
-        x_tilde : np.ndarray,
-        f       : np.ndarray,
+        x: np.ndarray,
+        f: np.ndarray,
+        obstacle_center: np.ndarray,
+        obstacle_lin_vel: np.ndarray,
+        obstacle_ang_vel: Optional[np.ndarray] = None,
+        clip_outward_only: bool = True,
+        tangential_damping: float = 1.0,
     ) -> np.ndarray:
+        """Moving-obstacle modulation, Eq. (17): modulation is done in the
+        obstacle frame, i.e. relative to the obstacle's instantaneous rigid
+        velocity, then the obstacle velocity is added back.
+
+        obstacle_ang_vel: for d==2 a scalar (or length-1 array) angular rate,
+        for d==3 an (3,) angular-velocity vector; omit for pure translation.
+        clip_outward_only implements Sec. V-A: the obstacle's velocity
+        component along the outward normal is only carried over when it is
+        moving away from x_r (>=0), avoiding the robot getting dragged along
+        with a passing obstacle.
         """
-        Compute modulated velocity  ξ̇ = M(ξ̃) f(ξ)
-        and enforce impenetrability at the safety-inflated boundary.
+        x = np.asarray(x, float)
+        f = np.asarray(f, float)
+        obstacle_center = np.asarray(obstacle_center, float)
+        obstacle_lin_vel = np.asarray(obstacle_lin_vel, float)
+        d = x.shape[0]
 
-        Parameters
-        ----------
-        x       : robot position in world frame, shape (d,)
-        x_tilde : x - obstacle_center, shape (d,)
-        f       : original DS velocity at x, shape (d,)
+        x_rel = x - obstacle_center
+        if obstacle_ang_vel is None:
+            v_transport = obstacle_lin_vel.copy()
+        elif d == 2:
+            omega = float(np.asarray(obstacle_ang_vel).reshape(-1)[0])
+            # 2D "cross product" of a scalar omega with a planar vector
+            rot = omega * np.array([-x_rel[1], x_rel[0]])
+            v_transport = obstacle_lin_vel + rot
+        elif d == 3:
+            v_transport = obstacle_lin_vel + np.cross(np.asarray(obstacle_ang_vel, float), x_rel)
+        else:
+            raise ValueError("obstacle_ang_vel only supported for d in {2, 3}")
 
-        Returns
-        -------
-        dx_dt : modulated velocity, shape (d,)
-        """
-        x       = np.asarray(x,       float)
-        x_tilde = np.asarray(x_tilde, float)
-        f       = np.asarray(f,       float)
+        if clip_outward_only:
+            n = self.grad_gamma(x)
+            n_unit = n / (np.linalg.norm(n) + _EPS)
+            v_n = float(np.dot(v_transport, n_unit))
+            if v_n < 0:
+                v_transport = v_transport - v_n * n_unit  # remove inward component
 
-        dx_dt = self.M(x_tilde, f=f).dot(f)
+        if tangential_damping < 1.0:
+            n = self.grad_gamma(x)
+            n_unit = n / (np.linalg.norm(n) + _EPS)
+            v_n_component = float(np.dot(v_transport, n_unit)) * n_unit
+            v_tangential = v_transport - v_n_component
+            v_transport = v_n_component + tangential_damping * v_tangential
 
-        # --- Impenetrability clamp ---
-        # If inside the inflated boundary, remove any inward normal component.
-        x_tilde_safe      = x_tilde * self.safety_eta
-        n                 = self._get_normal(x_tilde_safe)
-        n_unit            = n / (np.linalg.norm(n) + _EPS)
-        gamma_val         = self.gamma(x_tilde)
-        effective_boundary = 1.0 / self.safety_eta   # equivalent: γ(x̃_safe) = 1
+        return self.modulate(x, f, v_obs=v_transport)
 
-        if gamma_val <= effective_boundary:
-            normal_vel = float(n_unit.dot(dx_dt))
-            if normal_vel < 0:
-                dx_dt = dx_dt - normal_vel * n_unit
+    def _apply_safety(self, x: np.ndarray) -> np.ndarray:
+        x_r = _resolve_ref_point(self.reference_point)
+        return x_r + (x - x_r) * self.safety_eta
 
-        return dx_dt
-
-    # ----------------------------------------------------------
-    # Modulation matrix  M = E D E⁻¹
-    # ----------------------------------------------------------
-
-    def M(
-        self,
-        x_tilde : np.ndarray,
-        f       : Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Compute the d×d modulation matrix M(ξ̃) = E(ξ̃) D(ξ̃) E(ξ̃)⁻¹.
-
-        Paper Eq. (15).
-
-        The tail-effect correction (Eq. 23) requires the *modulated*
-        velocity ξ̇ = M·f for its sign check — not f itself.
-        We use a two-pass approach: first build M without the tail-effect
-        correction to get a preliminary ξ̇, then recompute D with the
-        correct sign check.
-
-        Parameters
-        ----------
-        x_tilde : x - obstacle_center, shape (d,)
-        f       : original DS velocity.  If None, tail-effect is skipped.
-        """
-        x_tilde      = np.asarray(x_tilde, float)
-        x_tilde_safe = x_tilde * self.safety_eta
-        E            = self.E(x_tilde_safe)
-
+    def M(self, x: np.ndarray, f: Optional[np.ndarray] = None) -> np.ndarray:
+        x = np.asarray(x, float)
+        x_safe = self._apply_safety(x)
+        E = self.E(x_safe)
+        D = self.D(x, f=f)
         try:
             E_inv = np.linalg.inv(E)
         except np.linalg.LinAlgError:
             E_inv = np.linalg.pinv(E)
-
-        if f is None or not self.tail_effect:
-            # No tail-effect correction needed
-            D = self.D(x_tilde, modulated_vel=None)
-            return E.dot(D).dot(E_inv)
-
-        # Pass 1: M without tail-effect → preliminary modulated velocity
-        D_no_tail  = self.D(x_tilde, modulated_vel=None)
-        M_prelim   = E.dot(D_no_tail).dot(E_inv)
-        f_mod_prelim = M_prelim.dot(np.asarray(f, float))
-
-        # Pass 2: D with correct sign check on modulated velocity (Eq. 23)
-        D = self.D(x_tilde, modulated_vel=f_mod_prelim)
         return E.dot(D).dot(E_inv)
 
-    # ----------------------------------------------------------
-    # Basis matrix  E = [n | e¹ | … | eᵈ⁻¹]
-    # ----------------------------------------------------------
+    def E(self, x: np.ndarray) -> np.ndarray:
+        """Eq. (5): E(x) = [r(x), e_1(x), .., e_{d-1}(x)].
 
-    def E(self, x_tilde: np.ndarray) -> np.ndarray:
+        r(x) is the reference direction from x_r (NOT the surface normal);
+        the tangents e_i still span the orthogonal complement of the
+        gradient of gamma. This is the sole structural change from v2's E().
         """
-        Build the d×d basis matrix whose first column is the
-        unit normal and remaining columns span the tangent hyperplane.
+        x_r = _resolve_ref_point(self.reference_point)
+        rel = x - x_r
+        rel_norm = np.linalg.norm(rel)
+        if rel_norm < _EPS:
+            raise ValueError("x coincides with the reference point; r(x) is undefined there.")
+        r_unit = rel / rel_norm
 
-        Paper Eq. (16).
+        n = self._get_normal(x)
+        n_norm = np.linalg.norm(n)
+        if n_norm < _EPS:
+            raise ValueError("Obstacle gradient is too small to define a normal.")
+        n_unit = n / n_norm
 
-        Parameters
-        ----------
-        x_tilde : position in *safety-inflated* obstacle frame, shape (d,)
-        """
-        n      = self._get_normal(x_tilde)
-        d      = n.shape[0]
-        n_unit = n / (np.linalg.norm(n) + _EPS)
+        tangents = _orthonormal_complement(n_unit)
+        return np.column_stack([r_unit, tangents])
 
-        tangents = []
-        for i in range(d):
-            ei   = np.zeros(d); ei[i] = 1.0
-            vi   = ei - np.dot(ei, n_unit) * n_unit
-            for t in tangents:
-                vi = vi - np.dot(vi, t) * t
-            norm_vi = np.linalg.norm(vi)
-            if norm_vi > 1e-8:
-                tangents.append(vi / norm_vi)
-            if len(tangents) >= d - 1:
-                break
+    def D(self, x: np.ndarray, f: Optional[np.ndarray] = None) -> np.ndarray:
+        """Eq. (6), (8): D(x) = diag(lambda_r, lambda_e, .., lambda_e),
+        generalized with the same rho exponent used in v2 so gamma(x)**(1/rho)
+        replaces the plain gamma(x) of the original paper (rho=1 recovers it)."""
+        x_safe = self._apply_safety(x)
+        gamma_val = abs(float(self.gamma(x_safe))) + _EPS
+        d = x.shape[0]
 
-        # Fallback: QR decomposition
-        if len(tangents) < d - 1:
-            Q, _ = np.linalg.qr(np.random.randn(d, d))
-            tangents = [
-                Q[:, i] for i in range(d)
-                if abs(np.dot(Q[:, i], n_unit)) < 1 - 1e-3
-            ][:d - 1]
+        denom = gamma_val ** (1.0 / self.rho)
+        lam_r = 1.0 - 1.0 / denom
+        lam_tau = 1.0 + 1.0 / denom
 
-        return np.column_stack([n_unit] + tangents[:d - 1])
-
-    # ----------------------------------------------------------
-    # Eigenvalue matrix  D = diag(λ₁, λ_τ, …, λ_τ)
-    # ----------------------------------------------------------
-
-    def D(
-        self,
-        x_tilde       : np.ndarray,
-        modulated_vel : Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Build the diagonal eigenvalue matrix D(ξ̃).
-
-        Paper Eq. (18) with reactivity ρ (Eq. 22) and optional
-        tail-effect correction (Eq. 23).
-
-        Parameters
-        ----------
-        x_tilde       : x - obstacle_center (UN-inflated), shape (d,)
-        modulated_vel : the *modulated* velocity ξ̇ = M·f, used for the
-                        tail-effect sign check (Eq. 23).
-                        Pass None to skip the tail-effect correction.
-
-        Notes
-        -----
-        The tail-effect check must use the modulated velocity ξ̇,
-        NOT the original DS velocity f.  Callers (including M()) are
-        responsible for passing the right vector here.
-        """
-        x_tilde_safe = x_tilde * self.safety_eta
-        gamma_val    = abs(float(self.gamma(x_tilde_safe))) + _EPS
-        d            = x_tilde.shape[0]
-
-        denom   = gamma_val ** (1.0 / self.rho)
-        lam_n   = 1.0 - 1.0 / denom   # λ₁ — normal eigenvalue
-        lam_tau = 1.0 + 1.0 / denom   # λ_τ — tangent eigenvalues
-
-        # --- Tail-effect correction (Eq. 23) ---
-        # λ₁ = 1 when the robot is moving AWAY from the obstacle
-        # i.e. n(ξ̃)ᵀ ξ̇ ≥ 0
-        # Must use the modulated velocity ξ̇, not the raw DS f.
-        if self.tail_effect and modulated_vel is not None:
-            n      = self._get_normal(x_tilde_safe)
+        if self.tail_effect and f is not None:
+            n = self._get_normal(x_safe)
             n_unit = n / (np.linalg.norm(n) + _EPS)
-            if float(np.dot(n_unit, modulated_vel)) >= 0:
-                lam_n = 1.0
+            if float(np.dot(n_unit, f)) >= 0:
+                lam_r = 1.0
 
-        lam_n   = max(lam_n,   self.lambda_min)
+        lam_r = max(lam_r, self.lambda_min)
         lam_tau = min(lam_tau, 1.0 + self.lambda_max_factor)
 
-        return np.diag([lam_n] + [lam_tau] * (d - 1))
+        return np.diag([lam_r] + [lam_tau] * (d - 1))
 
-    # ----------------------------------------------------------
-    # Helpers
-    # ----------------------------------------------------------
+    # ---------------------- Helpers ----------------------
 
-    def _get_normal(self, x_tilde: np.ndarray) -> np.ndarray:
-        """Return grad_gamma evaluated at x_tilde.  Shape (d,)."""
-        n = np.asarray(self.grad_gamma(x_tilde), float)
-        if n.ndim != 1 or n.shape[0] != x_tilde.shape[0]:
-            raise ValueError("grad_gamma must return a 1D vector of the same dimension as x_tilde")
+    def _get_normal(self, x: np.ndarray) -> np.ndarray:
+        n = np.asarray(self.grad_gamma(x), float)
+        if n.ndim != 1 or n.shape[0] != x.shape[0]:
+            raise ValueError("grad_gamma must return a 1D vector of same dimension")
         return n
 
-    # ----------------------------------------------------------
-    # Static gamma / grad_gamma factories
-    # ----------------------------------------------------------
+    # ---------------------- Static convex primitives (same as v2) ----------------------
 
     @staticmethod
     def gamma_sphere(x: np.ndarray, center: np.ndarray, radius: float) -> float:
@@ -314,476 +304,234 @@ class ModulationAvoider:
         return A.dot(v) / (np.sqrt(np.dot(v, A.dot(v)) + _EPS) + _EPS)
 
     @staticmethod
-    def gamma_superellipsoid(
-        x: np.ndarray, center: np.ndarray, radii: np.ndarray, p: float
-    ) -> float:
-        v = (np.asarray(x) - np.asarray(center)) / np.asarray(radii)
-        return float((np.sum(np.abs(v) ** p) + _EPS) ** (1.0 / p))
+    def gamma_superellipsoid(x, center, radii, p):
+        x, center, radii = np.asarray(x), np.asarray(center), np.asarray(radii)
+        v = (x - center) / radii
+        S = np.sum(np.abs(v) ** p)
+        return (S + 1e-9) ** (1.0 / p)
 
     @staticmethod
-    def grad_gamma_superellipsoid(
-        x: np.ndarray, center: np.ndarray, radii: np.ndarray, p: float
+    def grad_gamma_superellipsoid(x, center, radii, p):
+        x, center, radii = np.asarray(x), np.asarray(center), np.asarray(radii)
+        v = (x - center) / radii
+        abs_v = np.abs(v)
+        S = np.sum(abs_v ** p) + 1e-9
+        coeff = S ** (1.0 / p - 1.0)
+        term = (abs_v ** (p - 2)) * v
+        return coeff * (term / radii)
+
+    # ---------------------- Star-shaped / concave obstacles ----------------------
+
+    @staticmethod
+    def gamma_star_from_radius(
+        x: np.ndarray, reference_point: np.ndarray, radius_func: Callable[[np.ndarray], float], p: int = 1
+    ) -> float:
+        """Eq. (3) generalized to an arbitrary radius function R(direction):
+        Gamma(x) = (||x - x_r|| / R(d))^(2p), d = unit direction from x_r to x.
+
+        radius_func(unit_direction) -> distance from x_r to the boundary in
+        that direction. Because radius_func can be anything (a lookup table,
+        a ray-cast against a mesh/polygon, a Fourier series in angle, ...),
+        this single helper covers arbitrary star-shaped obstacles, convex or
+        concave, as long as x_r sees the whole boundary (one crossing/ray).
+        """
+        x = np.asarray(x, float)
+        reference_point = np.asarray(reference_point, float)
+        rel = x - reference_point
+        dist = np.linalg.norm(rel)
+        if dist < _EPS:
+            return 0.0
+        d_unit = rel / dist
+        R = float(radius_func(d_unit))
+        return (dist / (R + _EPS)) ** (2 * p)
+
+    @staticmethod
+    def grad_gamma_star_from_radius(
+        x: np.ndarray,
+        reference_point: np.ndarray,
+        radius_func: Callable[[np.ndarray], float],
+        p: int = 1,
+        h: float = 1e-6,
     ) -> np.ndarray:
-        x      = np.asarray(x);      center = np.asarray(center)
-        radii  = np.asarray(radii)
-        v      = (x - center) / radii
-        abs_v  = np.abs(v)
-        S      = np.sum(abs_v ** p) + _EPS
-        coeff  = S ** (1.0 / p - 1.0)
-        return coeff * ((abs_v ** (p - 2)) * v / radii)
+        """Finite-difference gradient of gamma_star_from_radius. Used by
+        default because radius_func is often only piecewise differentiable
+        (e.g. a polygon ray-cast) so no closed form is assumed."""
+        f = lambda xx: HuberModulationAvoider.gamma_star_from_radius(xx, reference_point, radius_func, p)
+        return numerical_gradient(f, np.asarray(x, float), h=h)
 
+    @staticmethod
+    def radius_function_polygon_2d(unit_direction: np.ndarray, reference_point: np.ndarray, vertices: np.ndarray) -> float:
+        """Ray-cast from reference_point along unit_direction against a
+        closed 2D polygon (vertices in order, shape (N, 2), CW or CCW).
+        Returns the distance to the nearest edge intersection.
 
-# ============================================================
-# SaddlePointEscaper — stateful across ticks, math only
-# ============================================================
-
-class SaddlePointEscaper:
-    """
-    Implements Algorithm 1 from Khansari-Billard 2012 for handling
-    saddle points and local minima on the obstacle boundary.
-
-    Stateful: tracks whether an escape manoeuvre is in progress.
-
-    Call update() at every control tick.  It returns:
-        escape_velocity : np.ndarray  — zeros when no escape needed
-        is_escaping     : bool        — True while escape is active
-
-    The caller decides how to use the output:
-        Simulation:  x_next = x + dt * (escape_vel if is_escaping else v_mod)
-        Hardware:    command(escape_vel if is_escaping else v_mod)
-
-    Hardware-specific concerns (filtering, velocity limits, safety stops)
-    are intentionally left to the caller.  This class only decides:
-        1. Are we stuck?  (stuck_ticks_required consecutive ticks below thresh)
-        2. Which direction to escape?  (Algorithm 1, tangent cost selection)
-        3. What velocity to command?   (displacement / time, clipped to max_escape_vel)
-        4. Is it safe to hand back control?  (gamma + velocity check)
-
-    Parameters
-    ----------
-    max_escape_vel : float
-        Maximum speed during escape (m/s or rad/s).  Tune per robot.
-    stuck_vel_thresh : float
-        Modulated velocity magnitude below which the robot is considered stuck.
-    stuck_ticks_required : int
-        How many consecutive ticks below thresh before escape triggers.
-        Use 1 for simulation (deterministic), 10–30 for hardware (noisy).
-    vel_filter_alpha : float
-        IIR smoothing on ||v_mod|| for the stuck check.
-        1.0 = no filtering (simulation), 0.05–0.2 for hardware.
-        alpha = 1 disables filtering entirely (instantaneous check).
-    cooldown_ticks : int
-        Ticks to wait after an escape before allowing re-trigger.
-        0 is fine for simulation.  50–100 recommended for hardware.
-    resume_gamma_margin : float
-        Resume normal DS when gamma > (1/safety_eta) * resume_gamma_margin.
-        1.05 means 5% outside the inflated boundary.
-    """
-
-    def __init__(
-        self,
-        max_escape_vel        : float = 0.05,
-        stuck_vel_thresh      : float = 0.01,
-        stuck_ticks_required  : int   = 1,
-        vel_filter_alpha      : float = 1.0,
-        cooldown_ticks        : int   = 0,
-        resume_gamma_margin   : float = 1.5,
-    ):
-        assert 0 < vel_filter_alpha <= 1.0, "vel_filter_alpha must be in (0, 1]"
-
-        self.max_escape_vel       = float(max_escape_vel)
-        self.stuck_vel_thresh     = float(stuck_vel_thresh)
-        self.stuck_ticks_required = int(stuck_ticks_required)
-        self.vel_filter_alpha     = float(vel_filter_alpha)
-        self.cooldown_ticks_total = int(cooldown_ticks)
-        self.resume_gamma_margin  = float(resume_gamma_margin)
-
-        self._reset_state()
-
-    # ----------------------------------------------------------
-    # Public interface
-    # ----------------------------------------------------------
-
-    @property
-    def is_escaping(self) -> bool:
-        return self._escaping
-
-    def reset(self):
-        """Hard reset — call when starting a new motion or after an error."""
-        self._reset_state()
-
-    def update(
-        self,
-        x          : np.ndarray,
-        obs_center : np.ndarray,
-        avoider    : ModulationAvoider,
-        f_nom      : Callable[[np.ndarray], np.ndarray],
-        goal       : np.ndarray,
-        dt         : float,
-        alpha      : float = 0.005,
-        trigger_zone : float = 1.1,
-        max_iters  : int   = 500,
-    ) -> tuple[np.ndarray, bool]:
+        Works directly for concave / star-shaped polygons: pass this as
+        radius_func into gamma_star_from_radius, together with the same
+        reference_point, to get gamma/grad_gamma for that concave shape.
+        (reference_point must be a point from which every polygon edge is
+        visible along a single ray - check with is_valid_reference_point.)
         """
-        Compute escape velocity for this tick.
+        p0 = np.asarray(reference_point, float)
+        d = np.asarray(unit_direction, float)
+        d = d / (np.linalg.norm(d) + _EPS)
+        n = vertices.shape[0]
+        best_t = np.inf
+        for i in range(n):
+            a = vertices[i]
+            b = vertices[(i + 1) % n]
+            edge = b - a
+            # Solve p0 + t*d = a + s*edge, t >= 0, s in [0,1]
+            denom = d[0] * edge[1] - d[1] * edge[0]
+            if abs(denom) < _EPS:
+                continue
+            ap = a - p0
+            t = (ap[0] * edge[1] - ap[1] * edge[0]) / denom
+            s = (ap[0] * d[1] - ap[1] * d[0]) / denom
+            if t >= 0 and -1e-9 <= s <= 1 + 1e-9:
+                best_t = min(best_t, t)
+        if not np.isfinite(best_t):
+            raise ValueError("Ray from reference_point does not hit the polygon boundary; "
+                              "reference_point is likely outside the polygon or not star-shaped in this direction.")
+        return float(best_t)
 
-        Parameters
-        ----------
-        x          : current robot position, shape (d,)
-        obs_center : obstacle center in world frame, shape (d,)
-        avoider    : ModulationAvoider instance configured for this obstacle
-        f_nom      : callable, returns original DS velocity at a position
-        goal       : goal position, shape (d,)  (used for tangent selection)
-        dt         : control timestep [s]
-        alpha      : step size along tangent in Algorithm 1
-        trigger_zone : gamma multiplier above effective boundary to start
-                       checking for stuck condition (paper: exactly 1.0,
-                       practical: 1.05–1.2 to account for numeric drift)
-        max_iters  : maximum iterations in Algorithm 1 escape loop
+    @staticmethod
+    def is_valid_reference_point(
+        gamma: Callable[[np.ndarray], float],
+        reference_point: np.ndarray,
+        dim: int,
+        n_samples: int = 200,
+        t_max: float = 100.0,
+        n_steps: int = 2000,
+    ) -> bool:
+        """Sampling-based sanity check for the star-shaped condition
+        (Sec. III-B/C): march outward from reference_point along many random
+        directions and count sign changes of (gamma - 1). A valid reference
+        point should give exactly one crossing per ray. Returns True iff
+        every sampled ray has exactly one crossing.
 
-        Returns
-        -------
-        escape_velocity : np.ndarray, shape (d,)
-            Non-zero only while is_escaping is True.
-            Caller should command this instead of normal DS velocity.
-        is_escaping : bool
-            True while an escape manoeuvre is in progress.
+        This is a heuristic check (finite samples, finite step size), not a
+        proof - use it to catch obviously bad reference points, e.g. ones
+        outside the obstacle or ones for which the obstacle is not actually
+        star-shaped.
         """
-        x          = np.asarray(x,          float)
-        obs_center = np.asarray(obs_center, float)
-        goal       = np.asarray(goal,       float)
+        reference_point = np.asarray(reference_point, float)
+        if gamma(reference_point) >= 1.0:
+            return False  # must start inside the obstacle
 
-        # --- Cooldown: wait after previous escape before re-triggering ---
-        if self._cooldown_remaining > 0:
-            self._cooldown_remaining -= 1
-            return np.zeros_like(x), False
+        rng = np.random.default_rng(0)
+        ts = np.linspace(t_max / n_steps, t_max, n_steps)
+        for _ in range(n_samples):
+            d = rng.normal(size=dim)
+            d = d / (np.linalg.norm(d) + _EPS)
+            prev = gamma(reference_point) - 1.0
+            crossings = 0
+            for t in ts:
+                cur = gamma(reference_point + t * d) - 1.0
+                if prev < 0 <= cur or prev >= 0 > cur:
+                    crossings += 1
+                prev = cur
+            if crossings != 1:
+                return False
+        return True
 
-        # --- Already escaping: sustain velocity until ticks are done ---
-        if self._escaping:
-            self._ticks_remaining -= 1
 
-            if self._ticks_remaining > 0:
-                return self._v_escape.copy(), True
+# ---------------------- Multiple obstacles ----------------------
 
-            # Ticks finished — check whether it is safe to hand back control.
-            # We use the current real position + live gamma + modulated velocity.
-            # This is robust to obstacle motion and avoids fragile forward sim.
-            x_tilde_now        = x - obs_center
-            gamma_now          = avoider.gamma(x_tilde_now)
-            effective_boundary = 1.0 / avoider.safety_eta
-            f_now              = np.asarray(f_nom(x), float)
-            v_mod_now          = avoider.M(x_tilde_now, f=f_now).dot(f_now)
+class MultiObstacleHuberAvoider:
+    """Weighted combination of several obstacles' modulated velocities,
+    Eqs. (11)-(16). Required whenever a concave region is represented as
+    several convex (or star-shaped) HuberModulationAvoider pieces that share
+    ONE common reference_point (Theorem 3 / Sec. IV-B) - e.g. two ellipsoids
+    modeling intersecting human forearms, or a robot approximated by two
+    convex hulls with a shared reference point (Fig. 3b in the paper).
 
-            outside   = gamma_now > effective_boundary * self.resume_gamma_margin
-            has_vel   = np.linalg.norm(v_mod_now) > self.stuck_vel_thresh
+    All avoiders passed in should therefore be built with the *same*
+    reference_point (or reference points that all coincide at the moment of
+    contact) for the convergence guarantee (Theorem 3) to apply.
+    """
 
-            if outside and has_vel:
-                # Safe — hand back control
-                self._escaping           = False
-                self._v_escape           = np.zeros_like(x)
-                self._ticks_remaining    = 0
-                self._stuck_counter      = 0
-                self._vel_mag_filtered   = 0.0
-                self._cooldown_remaining = self.cooldown_ticks_total
-                return np.zeros_like(x), False
+    def __init__(self, avoiders: Sequence[HuberModulationAvoider]):
+        assert len(avoiders) >= 1
+        self.avoiders = list(avoiders)
+
+    # ---------------------- Public API ----------------------
+
+    def modulate(self, x: np.ndarray, f: np.ndarray, v_obs: Optional[Sequence[np.ndarray]] = None) -> np.ndarray:
+        x = np.asarray(x, float)
+        f = np.asarray(f, float)
+        n_obs = len(self.avoiders)
+        v_obs_list = [None] * n_obs if v_obs is None else list(v_obs)
+
+        gammas = np.array([abs(float(a.gamma(x))) + _EPS for a in self.avoiders])
+        weights = self._weights(gammas)
+
+        xdots = np.stack([
+            a.modulate(x, f, v_obs=v_obs_list[i]) for i, a in enumerate(self.avoiders)
+        ])  # (n_obs, d)
+
+        magnitude = float(np.sum(weights * np.linalg.norm(xdots, axis=1)))  # Eq. (13)
+        n_bar = self._direction_interpolation(f, xdots, weights)  # Eqs. (14)-(16)
+        return n_bar * magnitude
+
+    # ---------------------- Internals ----------------------
+
+    @staticmethod
+    def _weights(gammas_minus_zero: np.ndarray) -> np.ndarray:
+        """Eq. (11)-(12): w_o = prod_{i != o}(Gamma_i - 1) / sum_k prod_{i != k}(Gamma_i - 1),
+        with the boundary special case w_o = 1 on obstacle o's own boundary."""
+        d = gammas_minus_zero - 1.0  # (Gamma_i - 1), >= 0 outside, 0 on boundary
+        n = d.shape[0]
+
+        near_boundary = d < 1e-8
+        if np.any(near_boundary):
+            w = np.zeros(n)
+            # if several are ~0 simultaneously, split evenly between them
+            w[near_boundary] = 1.0 / np.sum(near_boundary)
+            return w
+
+        prods = np.array([np.prod(np.delete(d, o)) for o in range(n)])
+        total = np.sum(prods)
+        if total < _EPS:
+            return np.ones(n) / n
+        return prods / total
+
+    @staticmethod
+    def _direction_interpolation(f: np.ndarray, xdots: np.ndarray, weights: np.ndarray) -> np.ndarray:
+        """Eqs. (14)-(16): interpolate directions on the log-map (kappa) of
+        the (d-1)-sphere centered on f(x)'s direction, then map back."""
+        d = f.shape[0]
+        f_norm = np.linalg.norm(f)
+        if f_norm < _EPS:
+            # No preferred axis; fall back to a plain weighted vector mean.
+            mean = np.sum(weights[:, None] * xdots, axis=0)
+            mnorm = np.linalg.norm(mean)
+            return mean / mnorm if mnorm > _EPS else np.zeros(d)
+
+        f_unit = f / f_norm
+        Rf = np.column_stack([f_unit, _orthonormal_complement(f_unit)])  # (d, d)
+
+        kappas = []
+        for xdot in xdots:
+            xdot_norm = np.linalg.norm(xdot)
+            if xdot_norm < _EPS:
+                kappas.append(np.zeros(d - 1))
+                continue
+            n_hat = xdot / xdot_norm
+            local = Rf.T.dot(n_hat)  # local[0] = cos(theta), local[1:] has norm sin(theta)
+            cos_t = np.clip(local[0], -1.0, 1.0)
+            theta = np.arccos(cos_t)
+            sin_t = np.linalg.norm(local[1:])
+            if sin_t < 1e-8:
+                kappas.append(np.zeros(d - 1))
             else:
-                # Not safe yet — extend escape in same direction
-                self._ticks_remaining = max(10, self.stuck_ticks_required)
-                return self._v_escape.copy(), True
+                kappas.append(theta / sin_t * local[1:])
+        kappas = np.stack(kappas)  # (n_obs, d-1)
 
-        # --- Not escaping: check trigger conditions ---
-
-        x_tilde            = x - obs_center
-        x_tilde_safe       = x_tilde * avoider.safety_eta
-        effective_boundary = 1.0 / avoider.safety_eta
-        gamma_val          = avoider.gamma(x_tilde)
-
-        # Condition 1 (paper): Γ(ξ̃) = 1 — robot is near the boundary
-        # trigger_zone > 1 because robot asymptotically approaches γ = 1/η
-        if gamma_val > effective_boundary * trigger_zone:
-            self._stuck_counter    = 0
-            self._vel_mag_filtered = 0.0
-            return np.zeros_like(x), False
-
-        # Condition 2 (paper): ξ̇ = 0 — robot is stuck
-        f_here = np.asarray(f_nom(x), float)
-        v_mod  = avoider.M(x_tilde, f=f_here).dot(f_here)
-        v_mag  = float(np.linalg.norm(v_mod))
-
-        # IIR filter — when vel_filter_alpha = 1.0 this is instantaneous
-        self._vel_mag_filtered = (
-            self.vel_filter_alpha * v_mag
-            + (1.0 - self.vel_filter_alpha) * self._vel_mag_filtered
-        )
-
-        if self._vel_mag_filtered >= self.stuck_vel_thresh:
-            self._stuck_counter = 0
-            return np.zeros_like(x), False
-
-        self._stuck_counter += 1
-        if self._stuck_counter < self.stuck_ticks_required:
-            return np.zeros_like(x), False
-
-        # Both conditions confirmed — run Algorithm 1 internally
-        self._stuck_counter    = 0
-        self._vel_mag_filtered = 0.0
-        
-        n_at_boundary  = avoider._get_normal(x_tilde_safe)
-        pos_scale       = float(np.linalg.norm(x_tilde_safe))
-        grad_scale      = 1.0 / (np.linalg.norm(n_at_boundary) + _EPS)
-        obstacle_scale  = max(pos_scale, grad_scale)
-        max_escape_dist = max(0.30, 4.0 * obstacle_scale)
-        
-        escape_vel, n_ticks = self._run_algorithm1(
-            x, x_tilde, x_tilde_safe, obs_center,
-            avoider, f_nom, goal,
-            alpha, dt, effective_boundary, max_iters,
-            max_escape_dist=max_escape_dist,
-        )
-
-        self._escaping        = True
-        self._v_escape        = escape_vel
-        self._ticks_remaining = n_ticks
-
-        return self._v_escape.copy(), True
-
-    # ----------------------------------------------------------
-    # Algorithm 1 — internal, runs on a position copy
-    # ----------------------------------------------------------
-
-    def _run_algorithm1(
-        self,
-        x            : np.ndarray,
-        x_tilde      : np.ndarray,
-        x_tilde_safe : np.ndarray,
-        obs_center   : np.ndarray,
-        avoider      : ModulationAvoider,
-        f_nom        : Callable,
-        goal         : np.ndarray,
-        alpha        : float,
-        dt           : float,
-        effective_boundary : float,
-        max_iters    : int,
-        max_escape_dist : float = 0.10,
-    ) -> tuple[np.ndarray, int]:
-        """
-        Run Algorithm 1 on a copy of the position.
-        Returns (escape_velocity, ticks_needed).
-
-        Paper Algorithm 1 (exact):
-            while true:
-                ξᵗ⁺¹ ← ξᵗ + α · eⁱ · δt
-                ξ̇ᵗ⁺¹ ← M(ξ̃ᵗ⁺¹) f(ξᵗ⁺¹)
-                exit if (eⁱ)ᵀ ξ̇ᵗ⁺¹ > 0  or  n(ξ̃)ᵀ ξ̇ᵗ⁺¹ > 0
-        """
-
-        MAX_ESCAPE_DIST = max_escape_dist
-        
-           
-
-        # Pick best tangent direction (handles both saddle and local-min cases)
-        E        = avoider.E(x_tilde_safe)
-        tangents = [E[:, i] for i in range(1, E.shape[1])]
-        e_i      = self._pick_tangent(
-            tangents, x, obs_center, avoider,
-            goal, alpha, dt, effective_boundary,
-        )
-
-        x_sim       = x.copy()
-        x_start     = x.copy()
-        steps_taken = 0
-
-        for _ in range(max_iters):
-            # Paper line 5: ξᵗ⁺¹ ← ξᵗ + α · eⁱ · δt
-            x_sim       = x_sim + alpha * e_i * dt
-            steps_taken += 1
-
-            if np.linalg.norm(x_sim - x_start) > MAX_ESCAPE_DIST:
-                break
-
-            # Paper line 6: ξ̇ᵗ⁺¹ = M(ξ̃ᵗ⁺¹) f(ξᵗ⁺¹)
-            x_tilde_sim      = x_sim - obs_center
-            x_tilde_safe_sim = x_tilde_sim * avoider.safety_eta
-            f_sim            = np.asarray(f_nom(x_sim), float)
-            v_new            = avoider.M(x_tilde_sim, f=f_sim).dot(f_sim)
-
-            n_sim  = avoider._get_normal(x_tilde_safe_sim)
-            n_unit = n_sim / (np.linalg.norm(n_sim) + _EPS)
-
-            # Paper lines 7-8: exit conditions
-            tangent_exit = float(np.dot(e_i, v_new))   > 0.0
-            normal_exit  = float(np.dot(n_unit, v_new)) > 0.0
-
-            if tangent_exit or normal_exit:
-                break
-
-        # Escape velocity = total displacement / total time
-        displacement = x_sim - x_start
-        time_needed  = max(steps_taken * dt, _EPS)
-        v_escape     = displacement / time_needed
-
-        # Clip to max_escape_vel, adjust tick count so robot travels full distance
-        v_norm = float(np.linalg.norm(v_escape))
-        if v_norm > self.max_escape_vel:
-            v_escape    = v_escape / v_norm * self.max_escape_vel
-            dist_needed = float(np.linalg.norm(displacement))
-            steps_taken = max(1, int(dist_needed / (self.max_escape_vel * dt)) + 1)
-
-        return v_escape, steps_taken
-
-    # ----------------------------------------------------------
-    # Tangent selection — cost = steps_to_escape + dist_to_goal
-    # ----------------------------------------------------------
-
-    def _pick_tangent(
-        self,
-        tangents           : list[np.ndarray],
-        x_start            : np.ndarray,
-        obs_center         : np.ndarray,
-        avoider            : ModulationAvoider,
-        goal               : np.ndarray,
-        alpha              : float,
-        dt                 : float,
-        effective_boundary : float,
-        max_steps          : int = 300,
-    ) -> np.ndarray:
-        """
-        Pick the tangent direction (±eⁱ) with lowest cost:
-            cost = steps_to_leave_boundary + remaining_dist_to_goal / (alpha * dt)
-
-        Works correctly for both saddle points (all ~1 step, picks goal-aligned)
-        and local minima (picks shortest path to nearest saddle point toward goal).
-        """
-        def cost(tangent: np.ndarray) -> float:
-            x_test = x_start.copy()
-
-            # Push slightly inside the boundary so escape distance is meaningful
-            # (robot may be numerically just outside γ = 1/η)
-            x_tilde_s = x_start - obs_center
-            # n_in      = avoider._get_normal(x_tilde_s * avoider.safety_eta)
-            # n_in_unit = n_in / (np.linalg.norm(n_in) + _EPS)
-            x_test = x_start.copy()   # scale-consistent push
-
-            for i in range(max_steps):
-                x_test = x_test + alpha * tangent * dt
-                xt     = x_test - obs_center
-                if avoider.gamma(xt) > effective_boundary:
-                    remaining = float(np.linalg.norm(goal - x_test))
-                    return i + remaining / (alpha * dt)
-
-            # Never escaped — very high cost
-            return max_steps + float(np.linalg.norm(goal - x_test)) / (alpha * dt)
-
-        best_cost = np.inf
-        best_dir  = tangents[0]
-
-        for t in tangents:
-            for direction in [t, -t]:
-                c = cost(direction)
-                if c < best_cost:
-                    best_cost = c
-                    best_dir  = direction
-
-        return best_dir
-
-    # ----------------------------------------------------------
-    # Internal state management
-    # ----------------------------------------------------------
-
-    def _reset_state(self):
-        self._escaping           = False
-        self._v_escape           = np.zeros(3)
-        self._ticks_remaining    = 0
-        self._stuck_counter      = 0
-        self._vel_mag_filtered   = 0.0
-        self._cooldown_remaining = 0
-
-
-# ============================================================
-# Usage examples
-# ============================================================
-
-"""
---- SHARED SETUP (same in both runners) ---
-
-import numpy as np
-from modulation_math import ModulationAvoider, SaddlePointEscaper
-
-obs_center = np.array([0.0, 0.0, 0.0])
-obs_radius = 0.3
-
-avoider = ModulationAvoider(
-    gamma      = lambda xt: ModulationAvoider.gamma_sphere(xt, np.zeros(3), obs_radius),
-    grad_gamma = lambda xt: ModulationAvoider.grad_gamma_sphere(xt, np.zeros(3), obs_radius),
-    rho        = 1.0,
-    safety_eta = 0.9,
-    tail_effect = True,
-)
-
-def f_nom(x):
-    goal = np.array([1.0, 0.0, 0.0])
-    return -2.0 * (x - goal)
-
-
---- SIMULATION RUNNER ---
-
-escaper = SaddlePointEscaper(
-    max_escape_vel       = 0.05,
-    stuck_vel_thresh     = 0.01,
-    stuck_ticks_required = 1,       # single tick is fine — no noise
-    vel_filter_alpha     = 1.0,     # no filtering needed
-    cooldown_ticks       = 0,
-    resume_gamma_margin  = 1.05,
-)
-
-x  = np.array([-1.0, 0.0, 0.0])
-dt = 0.01
-
-for _ in range(5000):
-    x_tilde   = x - obs_center
-    f         = f_nom(x)
-    v_mod     = avoider.modulate(x, x_tilde, f)
-
-    escape_vel, is_escaping = escaper.update(
-        x, obs_center, avoider, f_nom,
-        goal=np.array([1.0, 0.0, 0.0]),
-        dt=dt,
-    )
-
-    vel = escape_vel if is_escaping else v_mod
-    x   = x + dt * vel
-
-
---- HARDWARE RUNNER ---
-
-escaper = SaddlePointEscaper(
-    max_escape_vel       = 0.03,    # conservative for real robot
-    stuck_vel_thresh     = 0.008,
-    stuck_ticks_required = 20,      # ~40ms at 500Hz before triggering
-    vel_filter_alpha     = 0.1,     # smooth over ~10 ticks
-    cooldown_ticks       = 100,     # ~200ms cooldown at 500Hz
-    resume_gamma_margin  = 1.08,
-)
-
-# In your hardware control loop (called at fixed dt):
-def control_tick(x_current, dt):
-    x_tilde = x_current - obs_center
-    f       = f_nom(x_current)
-
-    # Apply your own low-pass filter to x_current before passing in
-    # Apply your own safety checks after getting vel out
-
-    v_mod = avoider.modulate(x_current, x_tilde, f)
-
-    escape_vel, is_escaping = escaper.update(
-        x_current, obs_center, avoider, f_nom,
-        goal=np.array([1.0, 0.0, 0.0]),
-        dt=dt,
-    )
-
-    vel = escape_vel if is_escaping else v_mod
-
-    # Your hardware layer handles: joint limit checks, torque limits,
-    # collision stops, watchdogs, etc.
-    return vel
-"""
+        kappa_bar = np.sum(weights[:, None] * kappas, axis=0)  # Eq. (14), linear mean in tangent space
+        theta_bar = np.linalg.norm(kappa_bar)
+        if theta_bar < 1e-8:
+            local_bar = np.zeros(d)
+            local_bar[0] = 1.0
+        else:
+            local_bar = np.concatenate([[np.cos(theta_bar)], np.sin(theta_bar) / theta_bar * kappa_bar])
+        return Rf.dot(local_bar)  # Eq. (15), n_bar

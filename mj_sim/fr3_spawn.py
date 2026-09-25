@@ -29,6 +29,7 @@ import mujoco.viewer as viewer
 # Converting above code to class file
 
 class FR3:
+        ee_site = "fr3_hand_gripper_center_site"
         def __init__(self, obstacles=None):
                 base_dir = os.path.dirname(__file__)
 
@@ -90,7 +91,8 @@ class FR3:
                 print("Site orientation:")
                 print(self.data.site_xmat[site_id].reshape(3, 3))
 
-        def get_jacobian(self, site_name = "attachment_site"):
+        def get_jacobian(self, site_name = None):
+                site_name = site_name or self.ee_site
                 site_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_SITE, site_name)
 
                 if site_id == -1:
@@ -107,7 +109,8 @@ class FR3:
 
                 return J_arm
 
-        def get_position(self, site_name = "attachment_site"):
+        def get_position(self, site_name = None):
+                site_name = site_name or self.ee_site
                 site_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_SITE, site_name)
 
                 if site_id == -1:
@@ -116,7 +119,8 @@ class FR3:
                 position = self.data.site_xpos[site_id].copy()
                 return position
 
-        def get_orientation(self, site_name = "attachment_site"):
+        def get_orientation(self, site_name = None):
+                site_name = site_name or self.ee_site
                 site_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_SITE, site_name)
 
                 if site_id == -1:
@@ -128,7 +132,8 @@ class FR3:
 
                 return quaternion
 
-        def get_cartesian_velocity(self, site_name="attachment_site"):
+        def get_cartesian_velocity(self, site_name=None):
+                site_name = site_name or self.ee_site
 
                 J = self.get_jacobian(site_name)
 
@@ -138,7 +143,8 @@ class FR3:
 
                 return V
 
-        def get_cartesian_state(self, site_name="attachment_site"):
+        def get_cartesian_state(self, site_name=None):
+                site_name = site_name or self.ee_site
                 position = self.get_position(site_name)
                 quaternion = self.get_orientation(site_name)
                 V = self.get_cartesian_velocity(site_name)
