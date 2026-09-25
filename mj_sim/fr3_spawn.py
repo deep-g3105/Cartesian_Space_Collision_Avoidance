@@ -24,7 +24,48 @@ import mujoco.viewer as viewer
 
 # mj.viewer.launch(model,data)
 
+def build_star_mesh(radius_func, n_theta=40, n_phi=20):
+        """UV-sphere-topology mesh whose radius per-direction comes from
+        radius_func(unit_direction) -> float. Same radius_func you pass to
+        HuberModulationAvoider.gamma_star_from_radius, so the rendered mesh
+        matches the avoidance boundary exactly."""
+        thetas = np.linspace(0, 2*np.pi, n_theta, endpoint=False)
+        phis = np.linspace(0, np.pi, n_phi + 1)
 
+        verts = [np.array([0.0, 0.0, radius_func(np.array([0.0, 0.0, 1.0]))])]  # north pole
+        for phi in phis[1:-1]:
+                for theta in thetas:
+                        d = np.array([np.sin(phi)*np.cos(theta), np.sin(phi)*np.sin(theta), np.cos(phi)])
+                        verts.append(radius_func(d) * d)
+        verts.append(np.array([0.0, 0.0, -radius_func(np.array([0.0, 0.0, -1.0]))]))  # south pole
+        verts = np.array(verts)
+
+        n_rings = n_phi - 1
+        south_idx = len(verts) - 1
+        faces = []
+
+        def ring_start(r):
+                return 1 + r * n_theta
+
+        # north pole fan
+        r0 = ring_start(0)
+        for j in range(n_theta):
+                faces.append([0, r0 + j, r0 + (j + 1) % n_theta])
+
+        # body quads (as 2 tris each)
+        for r in range(n_rings - 1):
+                r_a, r_b = ring_start(r), ring_start(r + 1)
+                for j in range(n_theta):
+                        j2 = (j + 1) % n_theta
+                        faces.append([r_a + j, r_b + j, r_b + j2])
+                        faces.append([r_a + j, r_b + j2, r_a + j2])
+
+        # south pole fan
+        r_last = ring_start(n_rings - 1)
+        for j in range(n_theta):
+                faces.append([south_idx, r_last + (j + 1) % n_theta, r_last + j])
+
+        return verts, np.array(faces)
 
 # Converting above code to class file
 
@@ -41,8 +82,11 @@ class FR3:
 
                 fr3_spec.attach(hand_spec, site="attachment_site", prefix="fr3_hand_")
                 for obs in (obstacles or []):
-                       
-                        self.add_sphere_obstacle(fr3_spec, obs["name"], np.asarray(obs["pos"]), radius = obs.get("radius", 0.05))
+                        if "mesh" in obs:
+                                verts, faces = obs["mesh"]
+                                self.add_mesh_obstacle(fr3_spec, obs["name"], np.asarray(obs["pos"]), verts, faces)
+                        else:
+                                self.add_sphere_obstacle(fr3_spec, obs["name"], np.asarray(obs["pos"]), radius = obs.get("radius", 0.05))
 
                 self.model = fr3_spec.compile()
                 self.data = mj.MjData(self.model)
@@ -191,6 +235,21 @@ class FR3:
                         rgba=rgba,
                         contype=1,      # participates in collision detection
                         conaffinity=1,
+                )
+                return body
+
+        def add_mesh_obstacle(self, spec, name, pos, vertices, faces, rgba=(1.0, 0.0, 0.0, 0.6)):
+                mesh = spec.add_mesh(name=name + "_mesh")
+                mesh.uservert = vertices.flatten()
+                mesh.userface = faces.flatten()
+
+                body = spec.worldbody.add_body(name=name, mocap=True, pos=pos)
+                body.add_geom(
+                        type=mj.mjtGeom.mjGEOM_MESH,
+                        meshname=name + "_mesh",
+                        rgba=rgba,
+                        contype=0,       # visual only — see note above on convex-hull collision
+                        conaffinity=0,
                 )
                 return body
 

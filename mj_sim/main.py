@@ -4,7 +4,7 @@ import numpy as np
 import mujoco as mj
 import time
 
-from fr3_spawn import FR3, DSMotionGenerator, FrankaGripper, OscillatingObstacle, SinusoidalObstacle
+from fr3_spawn import FR3, DSMotionGenerator, FrankaGripper, OscillatingObstacle, SinusoidalObstacle, build_star_mesh
 from cartesian_impedance import CartesianImpedanceController
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,15 +18,25 @@ M = np.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])  # Mass matrix
 K = np.diag([100.0, 100.0, 100.0, 50.0, 50.0, 50.0])  # Stiffness matrix
 B = np.diag([50.0, 50.0, 50.0, 50.0, 50.0, 50.0])  # Damping matrix
 
-point_A = np.array([0.6, -0.4, 0.4])
-point_B = np.array([0.6,  0.4, 0.4])
+point_A = np.array([0.4, -0.4, 0.4])
+point_B = np.array([0.4,  0.4, 0.4])
 A_gain = np.diag([2.0, 2.0, 2.0]) 
 
-obstacle_A = np.array([0.5, 0.4, 0.35])
-obstacle_B = np.array([0.5, -0.4, 0.35])
+obstacle_A = np.array([0.25, 0.4, 0.35])
+obstacle_B = np.array([0.25, -0.4, 0.35])
 obstacle_radius = 0.05
 
-robot = FR3(obstacles =[{"name":"obstacle1", "pos": obstacle_A, "radius": obstacle_radius}])
+def radius_function_lobed_3d(unit_direction, base_radius=0.08, lobe_amplitude=0.05, n_lobes=5):
+    """Non-convex star-shaped radius function. R depends only on the
+    azimuthal angle around z, so the obstacle is a 'gear/flower' shape —
+    concave dents between n_lobes bulges. Increase lobe_amplitude relative
+    to base_radius to make the non-convexity more pronounced (rough rule:
+    non-convex once lobe_amplitude / base_radius exceeds ~1/n_lobes^2)."""
+    theta = np.arctan2(unit_direction[1], unit_direction[0])
+    return base_radius + lobe_amplitude * np.cos(n_lobes * theta)
+
+star_verts, star_faces  = build_star_mesh(radius_function_lobed_3d)
+robot = FR3(obstacles =[{"name":"obstacle1", "pos": obstacle_A, "mesh": (star_verts, star_faces)}])
 
 # robot.print_site_info("attachment_site")
 
@@ -51,28 +61,39 @@ gripper = FrankaGripper(robot.model, robot.data)
 #     point_end=obstacle_B,
 #     period=6.0,                  # seconds for a full up-down-up cycle
 # )
+
+
 obstacle = SinusoidalObstacle(robot.model, robot.data, "obstacle1",
-                         center=[0.6, 0.0, 0.4],
+                         center=[0.4, 0.0, 0.4],
                          amplitude=[0.0, 0.2, 0.05],
                          frequency=[0, 2.0, 2.0],
                          phase=[0, 0, np.pi / 2])
 
 obstacle.set_params(frequency=0.5, amplitude=[0.1, 0.0, 0.1])
 
-def obstacle_gamma(x):
-    return HuberModulationAvoider.gamma_sphere(x, obstacle.get_position(), obstacle_radius)
+# def obstacle_gamma(x):
+#     return HuberModulationAvoider.gamma_sphere(x, obstacle.get_position(), obstacle_radius)
 
+
+# def obstacle_grad_gamma(x):
+#     return HuberModulationAvoider.grad_gamma_sphere(x, obstacle.get_position(), obstacle_radius)
+
+def obstacle_gamma(x):
+    return HuberModulationAvoider.gamma_star_from_radius(
+        x, obstacle.get_position(), radius_function_lobed_3d, p=0.5
+    )
 
 def obstacle_grad_gamma(x):
-    return HuberModulationAvoider.grad_gamma_sphere(x, obstacle.get_position(), obstacle_radius)
-
+    return HuberModulationAvoider.grad_gamma_star_from_radius(
+        x, obstacle.get_position(), radius_function_lobed_3d, p=0.5, h=1e-6
+    )
 
 avoider = HuberModulationAvoider(gamma = obstacle_gamma,
                             grad_gamma= obstacle_grad_gamma,
                             reference_point=obstacle.get_position,
                             dim=3,
                             rho = 1.0,
-                            safety_eta = 0.5)
+                            safety_eta = 0.75)
 
 # controller.set_target_pose(position=[0.5, 0.2, 0.5], quaternion=home_quaternion)  # Target position and orientation
 
@@ -107,7 +128,21 @@ with mj.viewer.launch_passive(robot.get_model(), robot.get_data()) as viewer:
 
         J = robot.get_jacobian()
         Lambda = robot.get_operational_space_mass(J)
-        tau = J.T @ (Lambda @ wrench) + robot.data.qfrc_bias[:7]  # Add Coriolis and gravity compensation
+
+        M_full = np.zeros((robot.model.nv, robot.model.nv))
+        mj.mj_fullM(robot.model, M_full, robot.data.qM)
+        M_inv = np.linalg.inv(M_full[:7, :7])
+        J_dyn_pinv = M_inv @ J.T@Lambda
+        N = np.eye(7) - J.T @ J_dyn_pinv.T
+
+        Kp_null = 10.0
+        Kd_null = 2.0 * np.sqrt(Kp_null)
+        q = robot.data.qpos[:7]
+        qd = robot.data.qvel[:7]
+        tau_posture = Kp_null*(robot.home - q) - Kd_null * qd
+        tau_null = N.T @ tau_posture
+
+        tau = J.T @ (Lambda @ wrench) + robot.data.qfrc_bias[:7] + tau_null  # Add Coriolis and gravity compensation
 
         robot.data.ctrl[:7] = tau
         # gripper.close()
