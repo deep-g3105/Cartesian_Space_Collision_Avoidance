@@ -82,7 +82,10 @@ class FR3:
 
                 fr3_spec.attach(hand_spec, site="attachment_site", prefix="fr3_hand_")
                 for obs in (obstacles or []):
-                        if "mesh" in obs:
+                        if "geoms" in obs:
+                                self.add_compound_obstacle(fr3_spec, obs["name"], np.asarray(obs["pos"]), obs["geoms"],
+                                                           quat=obs.get("quat", (1.0, 0.0, 0.0, 0.0)))
+                        elif "mesh" in obs:
                                 verts, faces = obs["mesh"]
                                 self.add_mesh_obstacle(fr3_spec, obs["name"], np.asarray(obs["pos"]), verts, faces)
                         else:
@@ -251,6 +254,31 @@ class FR3:
                         contype=0,       # visual only — see note above on convex-hull collision
                         conaffinity=0,
                 )
+                return body
+
+        def add_compound_obstacle(self, spec, name, pos, geoms, quat=(1.0, 0.0, 0.0, 0.0)):
+                """One mocap body with several geoms. Each geom is a dict with
+                type ("sphere" | "box" | "cylinder" | "capsule" | "mesh"), size (MuJoCo
+                convention), pos, quat, rgba and optional contype / conaffinity / group;
+                mesh geoms also carry vertices / faces and are visual only (MuJoCo would
+                collide with their convex hull)."""
+                types = {"sphere": mj.mjtGeom.mjGEOM_SPHERE, "box": mj.mjtGeom.mjGEOM_BOX,
+                         "cylinder": mj.mjtGeom.mjGEOM_CYLINDER, "capsule": mj.mjtGeom.mjGEOM_CAPSULE,
+                         "mesh": mj.mjtGeom.mjGEOM_MESH}
+                body = spec.worldbody.add_body(name=name, mocap=True, pos=pos, quat=quat)
+                for i, g in enumerate(geoms):
+                        kw = dict(type=types[g["type"]], pos=g.get("pos", [0, 0, 0]), quat=g.get("quat", [1, 0, 0, 0]),
+                                  rgba=g.get("rgba", (1.0, 0.0, 0.0, 0.6)), group=g.get("group", 0),
+                                  contype=g.get("contype", 1), conaffinity=g.get("conaffinity", 1))
+                        if g["type"] == "mesh":
+                                mesh = spec.add_mesh(name=f"{name}_mesh{i}")
+                                mesh.uservert = np.asarray(g["vertices"]).flatten()
+                                mesh.userface = np.asarray(g["faces"]).flatten()
+                                kw.update(meshname=f"{name}_mesh{i}", contype=0, conaffinity=0)
+                        else:
+                                size = list(g["size"]) + [0.0] * (3 - len(g["size"]))
+                                kw["size"] = size
+                        body.add_geom(**kw)
                 return body
 
 
