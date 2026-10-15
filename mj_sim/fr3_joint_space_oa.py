@@ -109,8 +109,8 @@ OBSTACLES = {
                   make=lambda: BoxObstacle("plate", on_arc(15, 0.35, r=0.66), [0.005, 0.15, 0.125],
                                            quat=yaw(15))),
     # non-convex shapes
-    "star": dict(enabled=False, info="lobed star-shaped (non-convex) obstacle",
-                 make=lambda: StarObstacle("star", on_arc(-15, 0.30), lobed_star, sphere_radius=0.02)),
+    "star": dict(enabled=True, info="lobed star-shaped (non-convex) obstacle",
+                 make=lambda: StarObstacle("star", on_arc(-15, 0.30), lobed_star, sphere_radius=0.2)),
     "cross": dict(enabled=False, info="cross of 9 spheres (IJRR Fig. 9), concave (LOCAL MINIMUM without MPC)",
                   make=lambda: CompoundObstacle("cross", on_arc(0, 0.40, r=0.62), [
                       SphereObstacle("c", [0, dy, dz], radius=0.045)
@@ -123,10 +123,10 @@ OBSTACLES = {
                       BoxObstacle("back", [0.11, 0, 0], [0.01, 0.20, 0.12], sphere_radius=0.02)],
                       quat=yaw(0), rgba=(0.55, 0.35, 0.2, 0.7))),
     # dynamic
-    "moving_sphere": dict(enabled=True, info="sphere r=6 cm oscillating up/down through the path",
+    "moving_sphere": dict(enabled=False, info="sphere r=6 cm oscillating up/down through the path",
                           make=lambda: SphereObstacle("moving_sphere", on_arc(10, 0.31), radius=0.06,
                                                       rgba=(0.9, 0.5, 0.1, 0.7)),
-                          motion=dict(amplitude=[0.0, 0.0, 0.18], frequency=0.15, phase=0.0)),
+                          motion=dict(amplitude=[0.18, 0.0, 0.0], frequency=0.15, phase=0.0)),
 }
 
 
