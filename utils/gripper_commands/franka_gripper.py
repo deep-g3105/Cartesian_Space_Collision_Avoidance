@@ -102,7 +102,7 @@ class FrankaGripperController:
 # --- Usage Example ---
 if __name__ == "__main__":
     # 1. Point to your Franka Workspace
-    WS_PATH = "/home/iitgn-robotics/Debojit_WS/franka_ros2_ws"
+    WS_PATH = "/home/deep/deepak_ws/franka_ros2_ws"
     
     # 2. Initialize (Make sure namespace matches your 'ros2 action list' output)
     franka = FrankaGripperController(workspace_path=WS_PATH, namespace="/NS_1")
@@ -114,9 +114,9 @@ if __name__ == "__main__":
     time.sleep(2) # Homing takes time
     
     # 2. Open Gripper
-    franka.open_gripper(width=0.08)
-    time.sleep(2)
+    # franka.open_gripper(width=0.08)
+    # time.sleep(2)
     
     # 3. Close Gripper (Grasp)
     # Trying to grasp something at 4cm width
-    #franka.close_gripper(width=0.04, force=1.0)
+    franka.close_gripper(width=0.04, force=1.0)
