@@ -7,22 +7,31 @@ same classes as the FR3 simulation (utils/joint_space_oa):
 
     nominal DS     f(q) = LinearJointDS            (Eq. 36)
     distance       Gamma(q), grad Gamma(q)         (Eq. 3)   - PlanarArmDistance (exact, instead of the network)
-    modulation     q_dot = M(q) f(q) + f_rep(q)    (Eqs. 5-7, 12-13, 29-30, 33-35) - JointSpaceModulator
+    modulation     q_dot = M(q) (f(q) + alpha(q) M_perp g(q)) + f_rep(q)
+                   (Eqs. 5-7, 12-15, 29-35) - JointSpaceModulator
+    MPC            navigation kernels g(q) (Eq. 14) placed and optimised by MPPI
+                   (Eqs. 16-28) - KernelMPPI, one iteration every MPC_PERIOD
 
 Left:  task space - planar 2-link arm, circular obstacles with their safety
-       (eps) and influence (d2) rings, goal ghost arm, end-effector trail.
+       (eps) and influence (d2) rings, goal ghost arm, end-effector trail,
+       end-effector path predicted by the MPC (light blue), kernel centres (green).
 Right: joint space - C-obstacle map (red: Gamma <= 0, orange: modulation band
-       0 < Gamma < d2), modulated vector field, trajectory, and at the current
-       state the nominal f (grey), modulated q_dot (blue) and normal n (red).
-Bottom: Gamma, lambda_n, lambda_tau, lambda_v, f_rep and the sigmoid gains.
+       0 < Gamma < d2), modulated vector field, trajectory, MPPI roll-outs
+       (light blue, cf. IJRR Fig. 5), navigation kernels (green ring: half
+       activation, arrow: direction g_k), and at the current state the nominal
+       f (grey), modulated q_dot (blue), normal n (red) and alpha g (green).
+Bottom: Gamma, lambda_n, lambda_tau, lambda_v, f_rep, alpha, MPC stats and the sigmoid gains.
+
+Scenario 2 is a local minimum of the plain modulation (press P to switch the
+MPC off and see it get stuck).
 
 Controls
     task panel   left-drag obstacle: move | left click / drag elsewhere: goal (IK)
                  right click: add obstacle / remove obstacle | wheel on obstacle: resize
     joint panel  left click / drag: goal in joint space | shift + left click: move robot there
     keys         1 2 3 scenarios | SPACE pause | R reset robot | S swap start/goal
-                 M modulation on/off | T tail-effect on/off | F vector field | E elbow up/down
-                 + / - sim speed | C clear trails | ESC quit
+                 M modulation on/off | P MPC on/off | K clear kernels | T tail-effect on/off
+                 F vector field | E elbow up/down | + / - sim speed | C clear trails | ESC quit
 
 Run:  python3 animations/2d_joint_space.py
 """
@@ -40,7 +49,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from utils.joint_space_oa import (PlanarArm, PlanarArmDistance, JointSpaceModulator,
-                                  LinearJointDS, sigmoid_gain)
+                                  LinearJointDS, KernelMPPI)
 
 # ---------------------------------------------------------------------- #
 # layout & style
@@ -65,12 +74,15 @@ FREE_NEAR, FREE_FAR = (255, 247, 240), (255, 255, 255)
 TRAJ = (35, 110, 220)
 GOAL = (240, 160, 30)
 GOOD, WARN, BAD = (34, 150, 80), (230, 140, 20), (210, 50, 50)
+KERNEL = (30, 150, 80)
+ROLL, ROLL_MEAN = (150, 195, 240), (60, 140, 225)
 
 # ---------------------------------------------------------------------- #
 # model (same classes as the FR3 simulation)
 # ---------------------------------------------------------------------- #
 SIM_DT = 0.004
 DS_SPEED = 1.0                          # rad/s
+MPC_PERIOD = 0.05                       # s of sim time between MPPI iterations (paper: ~20 Hz)
 ARM = PlanarArm(l1=0.5, l2=0.4, link_radius=0.03)
 DIST = PlanarArmDistance(ARM)
 
@@ -83,10 +95,10 @@ def polar(angle, r):
 SCENARIOS = {
     1: dict(name="single obstacle (passed around its tip)",
             start=[-2.4, -0.8], goal=[2.4, -0.8], obstacles=[(polar(0.5, 0.75), 0.09)]),
-    2: dict(name="two obstacles: avoids the first, LOCAL MINIMUM at the second (cf. IJRR Fig. 3)",
+    2: dict(name="two obstacles, local minimum without MPC (IJRR Figs. 3, 5)",
             start=[-2.6, 0.16], goal=[2.6, 0.16],
             obstacles=[(polar(-1.11, 0.72), 0.06), (polar(0.98, 0.78), 0.09)]),
-    3: dict(name="three obstacles (cluttered, passed)",
+    3: dict(name="three obstacles (cluttered)",
             start=[-2.6, -0.94], goal=[2.6, -0.94],
             obstacles=[(polar(-1.3, 0.73), 0.09), (polar(0.26, 0.74), 0.06), (polar(0.96, 0.66), 0.08)]),
 }
@@ -177,6 +189,8 @@ def draw_arm(surf, q, alpha=255, width_scale=1.0):
 class Sim:
     def __init__(self):
         self.mod = JointSpaceModulator(dt=SIM_DT, max_qdot=2.0, q_min=[-math.pi] * 2, q_max=[math.pi] * 2)
+        self.mpc = KernelMPPI(self.mod, DIST.batch, 2, q_min=[-math.pi] * 2, q_max=[math.pi] * 2)
+        self.use_mpc = True
         self.modulation = True
         self.paused = False
         self.show_field = True
@@ -198,11 +212,27 @@ class Sim:
         self.trail_q, self.trail_ee = [self.q.copy()], [ARM.fk(self.q)[2]]
         self.still_time = 0.0
         self.collided = False
+        self.clear_kernels()
         self.update_readout()
+
+    def clear_kernels(self):
+        self.mpc.reset()
+        self.mpc_timer = MPC_PERIOD                 # run an MPPI iteration on the next step
+        self.field_dirty = True
 
     def set_goal(self, q_goal):
         self.ds = LinearJointDS(np.clip(q_goal, -math.pi + 0.06, math.pi - 0.06), speed=DS_SPEED)
+        self.clear_kernels()                        # kernels are specific to the attractor
         self.dirty = True
+
+    def mpc_on(self):
+        return self.use_mpc and self.modulation
+
+    def kernel_input(self, q, f, gamma, grad):
+        """g(q), alpha(q) of the current MPC policy (None, 0 when the MPC is off)."""
+        if not self.mpc_on():
+            return None, 0.0
+        return self.mpc.policy(q, f, gamma, grad, self.ds.q_goal)
 
     def arrays(self):
         if not self.obstacles:
@@ -213,8 +243,9 @@ class Sim:
         C, R = self.arrays()
         self.f = self.ds(self.q)
         self.gamma, self.grad, self.dinfo = DIST(self.q, C, R)
+        self.g_kernel, self.alpha = self.kernel_input(self.q, self.f, self.gamma, self.grad)
         if self.modulation:
-            _, self.minfo = self.mod.velocity(self.f, self.gamma, self.grad)
+            _, self.minfo = self.mod.velocity(self.f, self.gamma, self.grad, self.g_kernel, self.alpha)
         else:
             self.minfo = {}
 
@@ -224,10 +255,18 @@ class Sim:
         C, R = self.arrays()
         n_sub = max(1, int(round(self.speed * frame_dt / SIM_DT)))
         for _ in range(n_sub):
+            if self.mpc_on():
+                self.mpc_timer += SIM_DT
+                if self.mpc_timer >= MPC_PERIOD - 1e-9:
+                    self.mpc_timer = 0.0
+                    k_before = self.mpc.num_kernels
+                    self.mpc.update(self.q, self.ds, C, R)
+                    self.field_dirty |= self.mpc.num_kernels > 0 or k_before > 0
             f = self.ds(self.q)
             g, grad, _ = DIST(self.q, C, R)
             if self.modulation:
-                self.q, self.qdot, _ = self.mod.step(self.q, f, g, grad)
+                gk, alpha = self.kernel_input(self.q, f, g, grad)
+                self.q, self.qdot, _ = self.mod.step(self.q, f, g, grad, gk, alpha)
             else:
                 self.qdot = self.mod._limit(f)
                 self.q = np.clip(self.q + self.qdot * SIM_DT, -math.pi + 0.05, math.pi - 0.05)
@@ -246,8 +285,14 @@ class Sim:
         if self.gamma <= 0.0:
             return "IN COLLISION", BAD
         if self.still_time > 0.6:
-            return "LOCAL MINIMUM  (f anti-parallel to n - needs MPC navigation kernels)", WARN
-        return ("MOVING" + ("" if self.modulation else "  (modulation OFF)")), (INK if self.modulation else BAD)
+            if self.mpc_on():
+                return "LOCAL MINIMUM  - MPPI exploring navigation kernels", WARN
+            return "LOCAL MINIMUM  (f anti-parallel to n - press P for the MPC navigation kernels)", WARN
+        if not self.modulation:
+            return "MOVING  (modulation OFF)", BAD
+        if self.mpc_on() and self.alpha > 0.05:
+            return "MOVING  - deflected by navigation kernels", KERNEL
+        return "MOVING", INK
 
 
 # ---------------------------------------------------------------------- #
@@ -273,29 +318,78 @@ class JointMap:
         img = np.where(edge[..., None], np.array((150, 30, 25)), img)
         surf = pygame.surfarray.make_surface(img.transpose(1, 0, 2).astype(np.uint8))
         self.surface = pygame.transform.smoothscale(surf, JOINT.size)
-
-        self.field = []
-        if sim.show_field:
-            g = np.linspace(-math.pi, math.pi, FIELD_RES + 2)[1:-1]
-            for q1 in g:
-                for q2 in g:
-                    q = np.array([q1, q2])
-                    gam, grad, _ = DIST(q, C, R)
-                    if gam <= 0:
-                        continue
-                    f = sim.ds(q)
-                    v = sim.mod.velocity(f, gam, grad)[0] if sim.modulation else f
-                    nv = np.linalg.norm(v)
-                    if nv > 1e-6:
-                        self.field.append((q, v / nv, gam < d2))
+        self.update_field(sim)
         sim.dirty = False
+
+    def update_field(self, sim):
+        """Modulated (and kernel-deflected) vector field, one batched evaluation."""
+        self.field = []
+        sim.field_dirty = False
+        if not sim.show_field:
+            return
+        C, R = sim.arrays()
+        g = np.linspace(-math.pi, math.pi, FIELD_RES + 2)[1:-1]
+        Q = np.stack(np.meshgrid(g, g, indexing="ij"), -1).reshape(-1, 2)
+        gam, grad = DIST.batch(Q, C, R)
+        F = sim.ds.batch(Q)
+        if sim.modulation:
+            G, alpha = sim.mpc.policy_batch(Q, F, gam, grad, sim.ds.q_goal) if sim.mpc_on() else (None, None)
+            V, _ = sim.mod.velocity_batch(F, gam, grad, G, alpha)
+        else:
+            V, alpha = F, None
+        nv = np.linalg.norm(V, axis=1)
+        for i in np.flatnonzero((gam > 0) & (nv > 1e-6)):
+            deflected = alpha is not None and alpha[i] * np.linalg.norm(G[i]) > 0.05
+            self.field.append((Q[i], V[i] / nv[i], 2 if deflected else int(gam[i] < sim.mod.d2)))
 
     def draw(self, screen, sim):
         screen.blit(self.surface, JOINT.topleft)
-        for q, u, near in self.field:
+        colors = ((95, 105, 120), (180, 110, 40), KERNEL)
+        for q, u, kind in self.field:
             p = q_to_px(q)
             L = 13
-            arrow(screen, (95, 105, 120) if not near else (180, 110, 40), p, (u[0] * L, -u[1] * L), width=1, head=5)
+            arrow(screen, colors[kind], p, (u[0] * L, -u[1] * L), width=1 + (kind == 2), head=5)
+
+
+# ---------------------------------------------------------------------- #
+# MPC overlays
+# ---------------------------------------------------------------------- #
+def draw_mpc_joint(screen, sim):
+    """MPPI roll-outs (light blue, mean policy darker) and navigation kernels (green)."""
+    if not sim.mpc_on():
+        return
+    last = sim.mpc.last
+    if "rollouts" in last:
+        traj = last["rollouts"]                                     # (H+1, N, 2)
+        layer = pygame.Surface((W, H), pygame.SRCALPHA)
+        for i in range(1, traj.shape[1]):
+            pygame.draw.lines(layer, ROLL + (110,), False, [q_to_px(q) for q in traj[:, i]], 1)
+        screen.blit(layer, (0, 0))
+        pygame.draw.lines(screen, ROLL_MEAN, False, [q_to_px(q) for q in traj[:, 0]], 2)
+    k = sim.mpc.kernels
+    r_px = math.log(2.0) / k.width / (2 * math.pi) * JOINT.width       # half-activation radius
+    for c, g in zip(k.centers, k.directions):
+        p = q_to_px(c)
+        pygame.draw.circle(screen, KERNEL, p, int(r_px), 1)
+        pygame.draw.circle(screen, KERNEL, p, 4)
+        v = np.asarray(g) * 30.0
+        L = np.linalg.norm(v)
+        if L > 60:
+            v *= 60 / L
+        arrow(screen, KERNEL, p, (v[0], -v[1]), width=2, head=7)
+
+
+def draw_mpc_task(screen, sim):
+    """End-effector path of the predicted (mean-policy) roll-out and kernel centres."""
+    if not sim.mpc_on():
+        return
+    last = sim.mpc.last
+    if "rollouts" in last:
+        pts = [task_to_px(ARM.fk(q)[2]) for q in last["rollouts"][:, 0]]
+        for a, b in zip(pts[:-1:2], pts[1::2]):
+            pygame.draw.line(screen, ROLL_MEAN, a, b, 2)
+    for c in sim.mpc.kernels.centers:
+        pygame.draw.circle(screen, KERNEL, task_to_px(ARM.fk(c)[2]), 5, 2)
 
 
 # ---------------------------------------------------------------------- #
@@ -321,6 +415,7 @@ def draw_task_panel(screen, sim, fonts):
 
     if len(sim.trail_ee) > 1:
         pygame.draw.lines(screen, TRAJ, False, [task_to_px(p) for p in sim.trail_ee], 2)
+    draw_mpc_task(screen, sim)
     draw_arm(screen, sim.ds.q_goal, alpha=70)
     star(screen, GOAL, task_to_px(ARM.fk(sim.ds.q_goal)[2]), 11)
     draw_arm(screen, sim.q)
@@ -359,6 +454,7 @@ def draw_joint_panel(screen, sim, jmap, fonts):
 
     screen.set_clip(JOINT)
     dashed_line(screen, (120, 130, 145), q_to_px(sim.q), q_to_px(sim.ds.q_goal), dash=7)
+    draw_mpc_joint(screen, sim)
     if len(sim.trail_q) > 1:
         pts = [q_to_px(q) for q in sim.trail_q]
         pygame.draw.lines(screen, TRAJ, False, pts, 3)
@@ -375,6 +471,10 @@ def draw_joint_panel(screen, sim, jmap, fonts):
     if np.isfinite(sim.gamma) and sim.gamma < sim.mod.d2 and np.linalg.norm(sim.grad) > 1e-9:
         n = sim.grad / np.linalg.norm(sim.grad)
         arrow(screen, OBST, p, (n[0] * 40, -n[1] * 40), width=3)
+        if sim.g_kernel is not None and sim.alpha > 0.01:            # alpha M_perp g
+            gt = sim.alpha * (sim.g_kernel - n * float(n @ sim.g_kernel))
+            gt = gt / max(1.0, np.linalg.norm(gt) / DS_SPEED)
+            arrow(screen, KERNEL, p, (gt[0] * s, -gt[1] * s), width=3)
     pygame.draw.circle(screen, INK, p, 8)
     pygame.draw.circle(screen, (255, 255, 255), p, 4)
     screen.set_clip(None)
@@ -386,14 +486,14 @@ def draw_joint_panel(screen, sim, jmap, fonts):
         screen.blit(t, r)
     head = fonts["b"].render("JOINT SPACE", True, INK)
     screen.blit(head, (JOINT.left, JOINT.top - 26))
-    legend = [((140, 145, 155), "f(q)"), (TRAJ, "q̇"), (OBST, "n"),
-              (OBST, "Γ ≤ 0 (C-obstacle)"), (BAND, "0 < Γ < d2 (modulated)")]
-    x = JOINT.left + head.get_width() + 24
+    legend = [((140, 145, 155), "f"), (TRAJ, "q̇"), (OBST, "n"), (KERNEL, "αg / kernels"),
+              (ROLL_MEAN, "MPPI roll-outs"), (OBST, "Γ ≤ 0"), (BAND, "0 < Γ < d2")]
+    x = JOINT.left + head.get_width() + 16
     for col, txt in legend:
         pygame.draw.rect(screen, col, (x, JOINT.top - 19, 12, 12), border_radius=2)
         t = fonts["s"].render(txt, True, MUTED)
         screen.blit(t, (x + 16, JOINT.top - 22))
-        x += t.get_width() + 30
+        x += t.get_width() + 24
 
 
 def draw_hud(screen, sim, fonts):
@@ -403,26 +503,33 @@ def draw_hud(screen, sim, fonts):
     screen.blit(fonts["b"].render(status, True, col), (HUD.left + 16, HUD.top + 12))
     screen.blit(fonts["s"].render(f"scenario {sim.scenario}: {SCENARIOS[sim.scenario]['name']}", True, MUTED),
                 (HUD.left + 16, HUD.top + 40))
-    flags = (f"modulation {'ON' if sim.modulation else 'OFF'}  |  tail effect {'ON' if sim.mod.tail_effect else 'OFF'}"
-             f"  |  speed x{sim.speed:.2g}  |  {'PAUSED' if sim.paused else 'running'}"
-             f"  |  goal distance {sim.ds.distance(sim.q):.2f} rad")
+    flags = (f"modulation {'ON' if sim.modulation else 'OFF'} · MPC {'ON' if sim.mpc_on() else 'OFF'}"
+             f" · tail {'ON' if sim.mod.tail_effect else 'OFF'} · x{sim.speed:.2g}"
+             f" · {'PAUSED' if sim.paused else 'running'} · goal {sim.ds.distance(sim.q):.2f} rad")
     screen.blit(fonts["s"].render(flags, True, MUTED), (HUD.left + 16, HUD.top + 62))
-    keys = "1 2 3 scenario · SPACE pause · R reset · S swap · M modulation · T tail · F field · E elbow · +/- speed · C clear"
+    keys = ("1 2 3 scenario · SPACE pause · R reset · S swap · M modulation · P MPC · K clear kernels"
+            " · T tail · F field · E elbow · +/- speed · C clear")
     screen.blit(fonts["s"].render(keys, True, (160, 166, 175)), (HUD.left + 16, HUD.top + 100))
 
-    m = sim.minfo
+    m, last = sim.minfo, sim.mpc.last
+    mpc = sim.mpc_on()
     vals = [("Γ(q)", f"{100 * sim.gamma:5.1f}cm" if np.isfinite(sim.gamma) else "  ∞"),
             ("λ_n'", f"{m.get('lambda_n', 1.0):.2f}"), ("λ_τ", f"{m.get('lambda_tau', 1.0):.2f}"),
             ("λ_v", f"{m.get('lambda_v', 1.0):.2f}"), ("f_rep", f"{m.get('repulsion', 0.0):.2f}"),
-            ("|q̇|", f"{np.linalg.norm(sim.qdot):.2f}"), ("link", f"{sim.dinfo.get('link') or '-'}")]
-    x0 = HUD.left + 600
+            ("|q̇|", f"{np.linalg.norm(sim.qdot):.2f}"), ("link", f"{sim.dinfo.get('link') or '-'}"),
+            ("α", f"{sim.alpha:.2f}" if mpc else "-"),
+            ("kernels", f"{sim.mpc.num_kernels}" if mpc else "-"),
+            ("samples", f"{last.get('n_samples', 0)}" if mpc else "-"),
+            ("MPPI", f"{last.get('ms', 0.0):.1f}ms" if mpc else "-"),
+            ("cost", f"{last['cost'][last['best']]:.2f}" if mpc and "cost" in last else "-")]
+    x0 = HUD.left + 530
     for i, (k, v) in enumerate(vals):
-        x, y = x0 + (i % 3) * 145, HUD.top + 12 + (i // 3) * 24
+        x, y = x0 + (i % 4) * 126, HUD.top + 12 + (i // 4) * 24
         screen.blit(fonts["s"].render(k, True, MUTED), (x, y))
-        screen.blit(fonts["m"].render(v, True, INK), (x + 46, y - 1))
+        screen.blit(fonts["m"].render(v, True, INK), (x + 58, y - 1))
 
     # sigmoid gains of Eq. (12)-(13) with the current Gamma
-    plot = pygame.Rect(HUD.right - 300, HUD.top + 14, 280, 100)
+    plot = pygame.Rect(HUD.right - 290, HUD.top + 14, 270, 100)
     pygame.draw.rect(screen, (248, 249, 251), plot)
     gmax = 0.15
     gx = lambda gm: plot.left + gm / gmax * plot.width
@@ -452,11 +559,12 @@ def main():
     ap.add_argument("--scenario", type=int, default=1, choices=list(SCENARIOS))
     ap.add_argument("--screenshot", default=None, help="save a screenshot after --frames frames and exit")
     ap.add_argument("--frames", type=int, default=300)
+    ap.add_argument("--no-mpc", action="store_true", help="start with the MPC navigation kernels off (P toggles)")
     args = ap.parse_args()
 
     pygame.init()
     screen = pygame.display.set_mode((W, H))
-    pygame.display.set_caption("Joint-space DS modulation (IJRR 2024) - planar 2-link arm")
+    pygame.display.set_caption("Joint-space DS modulation + MPPI navigation kernels (IJRR 2024) - planar 2-link arm")
     clock = pygame.time.Clock()
     fonts = {"s": pygame.font.SysFont("dejavusans,arial", 14),
              "m": pygame.font.SysFont("dejavusansmono,monospace", 15),
@@ -464,6 +572,7 @@ def main():
     title = pygame.font.SysFont("dejavusans,arial", 22, bold=True)
 
     sim = Sim()
+    sim.use_mpc = not args.no_mpc
     sim.load(args.scenario)
     jmap = JointMap()
     drag_obs, drag_goal_task, drag_goal_joint = None, False, False
@@ -495,6 +604,11 @@ def main():
                 elif k == pygame.K_m:
                     sim.modulation = not sim.modulation
                     sim.dirty = True
+                elif k == pygame.K_p:
+                    sim.use_mpc = not sim.use_mpc
+                    sim.clear_kernels()
+                elif k == pygame.K_k:
+                    sim.clear_kernels()
                 elif k == pygame.K_t:
                     sim.mod.tail_effect = not sim.mod.tail_effect
                     sim.dirty = True
@@ -553,12 +667,14 @@ def main():
         sim.step(frame_dt)
         if sim.dirty or jmap.surface is None:
             jmap.update(sim)
+        elif sim.field_dirty:
+            jmap.update_field(sim)
 
         screen.fill(BG)
-        t = title.render("Joint-space obstacle avoidance by DS modulation", True, INK)
+        t = title.render("Joint-space obstacle avoidance: DS modulation + MPPI", True, INK)
         screen.blit(t, (30, 16))
-        screen.blit(fonts["s"].render("q̇ = M(q) f(q) + f_rep(q),   M = E D Eᵀ,   n = ∇Γ/|∇Γ|   (Koptev et al., IJRR 2024)",
-                                      True, MUTED), (30 + t.get_width() + 24, 24))
+        screen.blit(fonts["s"].render("q̇ = M(q) (f(q) + α(q) M⊥ g(q)) + f_rep(q),   g = Σ g_k exp(-γ|q - q_k|)"
+                                      "   (Koptev et al., IJRR 2024)", True, MUTED), (30 + t.get_width() + 24, 24))
         draw_task_panel(screen, sim, fonts)
         draw_joint_panel(screen, sim, jmap, fonts)
         draw_hud(screen, sim, fonts)

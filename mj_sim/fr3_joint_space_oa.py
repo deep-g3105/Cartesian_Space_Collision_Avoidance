@@ -2,22 +2,34 @@
 fr3_joint_space_oa.py
 
 Joint-space obstacle avoidance on the FR3 in MuJoCo with the learned neural
-joint-space SDF and DS modulation (Koptev, Figueroa, Billard, IJRR 2024),
-nominal modulation only (no MPC / navigation kernels yet):
+joint-space SDF, DS modulation and the sampling-based MPC navigation kernels
+(Koptev, Figueroa, Billard, IJRR 2024):
 
     nominal DS      q_dot = f(q), normalized linear DS cycling between Q_A and Q_B   (Eq. 36)
     distance        Gamma(q), grad Gamma(q) from the learned SDF over obstacle spheres (Eq. 3)
-    modulation      q_dot = M(q) f(q) + f_rep(q),  M = E D E^T                       (Eqs. 5-7, 12-13, 29-30, 33-34)
+    modulation      q_dot = M(q) (f(q) + alpha(q) M_perp g(q)) + f_rep(q)              (Eqs. 5-7, 12-15, 29-34)
+    kernels         g(q) = sum_k g_k exp(-gamma ||q - q_k||)                          (Eq. 14)
+    MPC             MPPI places kernels and optimises g_k from batched roll-outs      (Eqs. 16-28)
     integration     q_ref <- q_ref + q_dot dt                                         (Eq. 35)
+                    (reference governor: q_dot is scaled down when q_ref leads the measured q
+                     by more than --max-lead / 3, to 0 at --max-lead; not in the paper)
     control         joint impedance tau = K (q_ref - q) + B (q_dot_ref - q_dot) + bias
+
+As in the paper (Fig. 7), the modulated DS runs every control step (500 Hz)
+with the latest kernels, and one MPPI iteration runs every --mpc-period
+seconds of sim time (default 0.05 s = 20 Hz). Here the MPPI iteration is
+run synchronously (deterministic, but the viewer slows down while the MPC
+uses N samples). It uses a single roll-out (prediction only) until a local
+minimum is predicted, and N samples while the path crosses a kernel.
+Kernels are cleared when the attractor switches.
 
 Obstacles are presets in OBSTACLES below: flip "enabled" or pick them on
 the command line. They are placed along the arc swept by the hand between
 Q_A and Q_B so that the nominal motion runs into them. Obstacles at or
 below hand height are passed (the arm goes over them); the presets marked
-LOCAL MINIMUM (pole, cross, box_facing) stop the arm safely in front of the
-obstacle - escaping those is what the MPC navigation kernels of the paper
-are for.
+LOCAL MINIMUM (pole, cross, box_facing) stop the plain modulation (--no-mpc)
+safely in front of the obstacle - the MPC navigation kernels get the arm
+around them.
 
 Safety: Gamma is reduced by --margin (1 cm, learned-SDF error) on all
 links and --hand-margin (2 cm) on the hand (fingers are not in the SDF),
@@ -31,6 +43,7 @@ Usage (from the project root or mj_sim/):
     python3 mj_sim/fr3_joint_space_oa.py                               # default obstacles
     python3 mj_sim/fr3_joint_space_oa.py --obstacles pole star moving_sphere
     python3 mj_sim/fr3_joint_space_oa.py --obstacles cross --show-spheres
+    python3 mj_sim/fr3_joint_space_oa.py --obstacles pole --no-mpc     # plain modulation (local minimum)
     python3 mj_sim/fr3_joint_space_oa.py --no-avoidance                # nominal DS only (collides)
     python3 mj_sim/fr3_joint_space_oa.py --list                        # list obstacle presets
     python3 mj_sim/fr3_joint_space_oa.py --headless --duration 20      # no viewer, print summary
@@ -55,7 +68,7 @@ for p in (PROJECT_ROOT, MJ_SIM_DIR):
 
 from fr3_spawn import FR3, FrankaGripper, SinusoidalObstacle
 from utils.sdf import RobotMeshModel
-from utils.joint_space_oa import (CyclicJointDS, JSDFCollisionDistance, JointSpaceModulator,
+from utils.joint_space_oa import (CyclicJointDS, JSDFCollisionDistance, JointSpaceModulator, KernelMPPI,
                                   JointImpedanceController, ObstacleSet, SphereObstacle, BoxObstacle,
                                   CylinderObstacle, CapsuleObstacle, StarObstacle, CompoundObstacle,
                                   axis_angle_quat)
@@ -135,6 +148,14 @@ def parse_args():
     p.add_argument("--obstacles", nargs="*", default=None, help="obstacle presets to enable (overrides 'enabled')")
     p.add_argument("--list", action="store_true", help="list obstacle presets and exit")
     p.add_argument("--no-avoidance", action="store_true", help="run the nominal DS without modulation")
+    p.add_argument("--no-mpc", action="store_true", help="plain modulation, without the MPPI navigation kernels")
+    p.add_argument("--mpc-samples", type=int, default=32, help="MPPI roll-outs N while a kernel is active")
+    p.add_argument("--mpc-horizon", type=int, default=30, help="MPPI roll-out steps H")
+    p.add_argument("--mpc-dt", type=float, default=0.04, help="MPPI roll-out step [s]")
+    p.add_argument("--mpc-period", type=float, default=0.05, help="sim time between MPPI iterations [s]")
+    p.add_argument("--max-lead", type=float, default=0.15,
+                   help="reference governor: q_ref slows down from max_lead/3 and stops at max_lead [rad] ahead "
+                        "of the measured q (0 = off)")
     p.add_argument("--checkpoint", default=CHECKPOINT)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--speed", type=float, default=DS_SPEED, help="nominal DS speed [rad/s]")
@@ -194,6 +215,44 @@ class ClearanceMonitor:
         return float(per_link[k])
 
 
+class MPCOverlay:
+    """Draws the MPC in the viewer: hand path of the predicted (mean-policy) roll-out
+    (blue) and the hand position at each navigation-kernel centre (green)."""
+
+    def __init__(self, model, max_points=200):
+        self.model = model
+        self.kin = mj.MjData(model)
+        self.hand = mj.mj_name2id(model, mj.mjtObj.mjOBJ_SITE, "fr3_hand_gripper_center_site")
+        self.max_points = max_points
+        self.path, self.kernels = np.zeros((0, 3)), np.zeros((0, 3))
+
+    def hand_positions(self, Q):
+        out = np.empty((len(Q), 3))
+        for i, q in enumerate(Q):
+            self.kin.qpos[:7] = q
+            mj.mj_kinematics(self.model, self.kin)
+            out[i] = self.kin.site_xpos[self.hand]
+        return out
+
+    def update(self, planner):
+        last = planner.last
+        self.path = self.hand_positions(last["rollouts"][:, 0]) if "rollouts" in last else np.zeros((0, 3))
+        self.kernels = self.hand_positions(planner.kernels.centers)
+
+    def draw(self, scn):
+        scn.ngeom = 0
+        def add(pos, size, rgba):
+            if scn.ngeom >= min(scn.maxgeom, self.max_points):
+                return
+            mj.mjv_initGeom(scn.geoms[scn.ngeom], mj.mjtGeom.mjGEOM_SPHERE, np.array([size, 0, 0]),
+                            np.asarray(pos, dtype=float), np.eye(3).flatten(), np.asarray(rgba, dtype=np.float32))
+            scn.ngeom += 1
+        for p in self.path[::2]:
+            add(p, 0.006, (0.25, 0.55, 0.9, 0.8))
+        for p in self.kernels:
+            add(p, 0.018, (0.1, 0.7, 0.3, 0.6))
+
+
 def main():
     args = parse_args()
     if args.list:
@@ -234,7 +293,13 @@ def main():
                                                    for name in ("link0", "link1", "link2", "link3", "link4",
                                                                 "link5", "link6", "link7", "hand")})
     q_lo, q_hi = model.jnt_range[:7, 0], model.jnt_range[:7, 1]
-    modulator = JointSpaceModulator(dt=dt, max_qdot=MAX_QDOT, q_min=q_lo, q_max=q_hi)
+    lead = dict(lead_slow=args.max_lead / 3, lead_stop=args.max_lead) if args.max_lead > 0 else {}
+    modulator = JointSpaceModulator(dt=dt, max_qdot=MAX_QDOT, q_min=q_lo, q_max=q_hi, **lead)
+    use_mpc = not (args.no_mpc or args.no_avoidance)
+    planner = KernelMPPI(modulator, distance.batch, 7, n_samples=args.mpc_samples, horizon=args.mpc_horizon,
+                         dt=args.mpc_dt, q_min=q_lo + 0.05, q_max=q_hi - 0.05)
+    mpc_every = max(1, int(round(args.mpc_period / dt)))
+    overlay = None if args.headless or not use_mpc else MPCOverlay(model)
     controller = JointImpedanceController()
     monitor = ClearanceMonitor(model, data, obstacle_set, [o.name for o in obstacles], args.device)
 
@@ -242,10 +307,14 @@ def main():
         f"{o.name} {len(obstacle_set._local[i][1])} spheres (+{100 * obstacle_set.padding[i]:.1f} cm pad)"
         for i, o in enumerate(obstacles)))
     print(f"[oa] obstacles: {names or 'none'} ({obstacle_set.num_spheres} spheres for Gamma), "
-          f"device {args.device}, avoidance {'OFF' if args.no_avoidance else 'ON'}")
+          f"device {args.device}, avoidance {'OFF' if args.no_avoidance else 'ON'}, "
+          f"MPC {'ON' if use_mpc else 'OFF'}"
+          + (f" (N={args.mpc_samples}, H={args.mpc_horizon} x {args.mpc_dt} s, every {mpc_every * dt:.3f} s)"
+             if use_mpc else ""))
 
     state = {"gamma": np.inf, "clear": np.inf, "info": {}, "link": None, "compute": [],
-             "contact": None, "step": 0}
+             "contact": None, "step": 0, "goal_index": ds.index, "alpha": 0.0,
+             "mpc_ms": [], "mpc_full": 0, "kernels_placed": 0, "overlay_dirty": False}
 
     def control_step():
         t0 = time.perf_counter()
@@ -255,12 +324,23 @@ def main():
         centers, radii = obstacle_set.world_spheres(poses)
 
         f = ds(q_ref)
+        if ds.index != state["goal_index"]:          # attractor switched: kernels belong to the old one
+            state["goal_index"] = ds.index
+            planner.reset()
+        if use_mpc and state["step"] % mpc_every == 0:
+            info = planner.update(q_ref, ds, centers, radii)
+            state["mpc_ms"].append(info["ms"])
+            state["mpc_full"] += info["n_samples"] > 1
+            state["kernels_placed"] += info["placed"]
+            state["overlay_dirty"] = True
         gamma, grad, dinfo = distance(q_ref, centers, radii)
         if args.no_avoidance:
             q_next, qdot = q_ref + f * dt, f
             minfo = {}
         else:
-            q_next, qdot, minfo = modulator.step(q_ref, f, gamma, grad)
+            gk, alpha = planner.policy(q_ref, f, gamma, grad, ds.q_goal) if use_mpc else (None, 0.0)
+            q_next, qdot, minfo = modulator.step(q_ref, f, gamma, grad, gk, alpha, q_measured=data.qpos[:7])
+            state["alpha"] = alpha
         q_ref[:] = q_next
 
         q, qd = data.qpos[:7], data.qvel[:7]
@@ -281,10 +361,15 @@ def main():
         hit = state["contact"]
         state["contact"] = None
         contact = f" | CONTACT {hit[1]} {100 * hit[0]:.1f} cm" if hit else ""
+        mpc = ""
+        if use_mpc:
+            last = planner.last
+            mpc = (f" | kernels {planner.num_kernels} alpha {state['alpha']:.2f} "
+                   f"MPPI N={last.get('n_samples', 0)} {last.get('ms', 0.0):.0f} ms")
         return (f"t {data.time:6.2f}s | goal {'B' if ds.index == 0 else 'A'} dist {ds.ds.distance(q_ref):.2f} rad"
                 f" | Gamma {100 * state['gamma']:6.1f} cm ({state['link']}) | true clearance "
                 f"{100 * state['clear']:6.1f} cm ({monitor.closest}) | lambda_n {lam:.2f} | track err "
-                f"{np.linalg.norm(q_ref - data.qpos[:7]):.3f} rad{contact}")
+                f"{np.linalg.norm(q_ref - data.qpos[:7]):.3f} rad{mpc}{contact}")
 
     if args.headless:
         n_steps = int(args.duration / dt)
@@ -307,8 +392,14 @@ def main():
                     print(status())
                     if hasattr(viewer, "set_texts"):
                         viewer.set_texts((None, mj.mjtGridPos.mjGRID_TOPLEFT,
-                                          "Gamma (learned)\ntrue clearance\ngoals reached",
-                                          f"{100 * state['gamma']:.1f} cm\n{100 * state['clear']:.1f} cm\n{ds.reached}"))
+                                          "Gamma (learned)\ntrue clearance\ngoals reached\nkernels",
+                                          f"{100 * state['gamma']:.1f} cm\n{100 * state['clear']:.1f} cm\n"
+                                          f"{ds.reached}\n{planner.num_kernels if use_mpc else '-'}"))
+                if overlay is not None and state["overlay_dirty"]:
+                    state["overlay_dirty"] = False
+                    overlay.update(planner)
+                    with viewer.lock():
+                        overlay.draw(viewer.user_scn)
                 viewer.sync()
                 time.sleep(max(0.0, dt - (time.perf_counter() - t_wall)))
 
@@ -316,6 +407,10 @@ def main():
     print(f"\n[oa] summary: sim {data.time:.1f} s | goals reached {ds.reached} | "
           f"min true clearance {100 * monitor.min_seen:.1f} cm | steps in contact {monitor.contact_steps} | "
           f"control step {comp.mean():.2f} ms mean / {np.percentile(comp, 99):.2f} ms p99")
+    if use_mpc and state["mpc_ms"]:
+        ms = np.array(state["mpc_ms"])
+        print(f"[oa] MPC: {len(ms)} MPPI iterations ({state['mpc_full']} with N={args.mpc_samples}) | "
+              f"{ms.mean():.1f} ms mean / {ms.max():.1f} ms max | kernels placed {state['kernels_placed']}")
 
 
 if __name__ == "__main__":

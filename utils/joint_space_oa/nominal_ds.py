@@ -41,6 +41,11 @@ class LinearJointDS:
         e = np.asarray(q, dtype=float) - self.q_goal
         return -self.speed * e / max(np.linalg.norm(e), self.slow_radius)
 
+    def batch(self, Q: np.ndarray) -> np.ndarray:
+        """f for N states Q (N, d) -> (N, d) (MPC roll-outs)."""
+        E = np.asarray(Q, dtype=float) - self.q_goal
+        return -self.speed * E / np.maximum(np.linalg.norm(E, axis=1, keepdims=True), self.slow_radius)
+
     def distance(self, q: np.ndarray) -> float:
         return float(np.linalg.norm(np.asarray(q) - self.q_goal))
 
@@ -74,3 +79,10 @@ class CyclicJointDS:
             self.index = (self.index + 1) % len(self.goals)
             self.ds = LinearJointDS(self.goals[self.index], self.speed, self.slow_radius)
         return self.ds(q)
+
+    def batch(self, Q: np.ndarray) -> np.ndarray:
+        """Current attractor's DS for N states (no switching, for MPC roll-outs)."""
+        return self.ds.batch(Q)
+
+    def distance(self, q: np.ndarray) -> float:
+        return self.ds.distance(q)

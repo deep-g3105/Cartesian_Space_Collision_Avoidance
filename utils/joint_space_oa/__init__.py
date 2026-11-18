@@ -1,7 +1,9 @@
 # utils/joint_space_oa/__init__.py
-# Joint-space DS modulation with the learned SDF (Koptev, Figueroa, Billard, IJRR 2024), no MPC
+# Joint-space DS modulation with the learned SDF (Koptev, Figueroa, Billard, IJRR 2024),
+# with the MPPI-optimised navigation kernels (mpc.py)
 from .nominal_ds import LinearJointDS, CyclicJointDS
 from .modulation import JointSpaceModulator, sigmoid_gain
+from .mpc import NavigationKernels, KernelMPPI
 from .obstacles import (Obstacle, SphereObstacle, BoxObstacle, CylinderObstacle, CapsuleObstacle,
                         StarObstacle, CompoundObstacle, ObstacleSet, axis_angle_quat)
 from .joint_impedance import JointImpedanceController
@@ -13,6 +15,6 @@ except ImportError:
     JSDFCollisionDistance = None
 
 __all__ = ["LinearJointDS", "CyclicJointDS", "JSDFCollisionDistance", "JointSpaceModulator",
-           "sigmoid_gain", "Obstacle", "SphereObstacle", "BoxObstacle", "CylinderObstacle",
+           "sigmoid_gain", "NavigationKernels", "KernelMPPI", "Obstacle", "SphereObstacle", "BoxObstacle", "CylinderObstacle",
            "CapsuleObstacle", "StarObstacle", "CompoundObstacle", "ObstacleSet", "axis_angle_quat",
            "JointImpedanceController", "PlanarArm", "PlanarArmDistance"]

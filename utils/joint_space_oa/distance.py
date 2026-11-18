@@ -98,3 +98,27 @@ class JSDFCollisionDistance:
         s, k = divmod(flat, G.shape[1])
         info = {"link": self.link_names[k], "sphere": s, "per_link": G.min(0).values.cpu().numpy()}
         return float(gamma.detach()), qt.grad.cpu().numpy().astype(float), info
+
+    def batch(self, Q: np.ndarray, centers: np.ndarray, radii: np.ndarray
+              ) -> Tuple[np.ndarray, np.ndarray]:
+        """Gamma (N,) and grad Gamma (N, d) for N configurations Q (N, d) in one
+        network pass over all N x S (configuration, sphere) pairs (MPC roll-outs)."""
+        Q = np.asarray(Q)
+        N, d = Q.shape
+        if len(centers) == 0:
+            return np.full(N, np.inf), np.zeros((N, d))
+        qt = torch.as_tensor(Q, dtype=torch.float32, device=self.device).requires_grad_(True)
+        y = torch.as_tensor(np.asarray(centers), dtype=torch.float32, device=self.device)
+        r = torch.as_tensor(np.asarray(radii), dtype=torch.float32, device=self.device)
+        S = y.shape[0]
+        with torch.enable_grad():
+            G = self.net(qt[:, None].expand(N, S, d), y[None].expand(N, S, 3))         # (N, S, K)
+            G = G - r[None, :, None] - self.link_margins
+            G = torch.where(self.link_mask, G, torch.full_like(G, float("inf"))).reshape(N, -1)
+            if self.softmin_beta is None:
+                gamma = G.min(1).values
+            else:
+                Gv = G[:, torch.isfinite(G[0])]
+                gamma = -torch.logsumexp(-self.softmin_beta * Gv, dim=1) / self.softmin_beta
+            gamma.sum().backward()                    # rows are independent -> per-row gradients
+        return gamma.detach().cpu().numpy().astype(float), qt.grad.cpu().numpy().astype(float)

@@ -1,3 +1,6 @@
 Fri Sep  4 02:14:16 2026
 WARNING: Nan, Inf or huge value in CTRL at ACTUATOR 0. The simulation is unstable. Time = 0.0000.
 
+Tue Nov 17 23:48:35 2026
+ERROR: mj_copyDataVisual: attempting to copy mjData while stack is in use
+

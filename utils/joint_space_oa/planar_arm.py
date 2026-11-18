@@ -88,6 +88,42 @@ class PlanarArmDistance:
         grad = self.arm.point_jacobian(q, k, arc).T @ u
         return float(gamma), grad, {"link": f"link{k + 1}", "sphere": s, "point": p}
 
+    def batch(self, Q: np.ndarray, centers: np.ndarray, radii: np.ndarray
+              ) -> Tuple[np.ndarray, np.ndarray]:
+        """Gamma (N,) and grad Gamma (N, 2) for N configurations Q (N, 2) (MPC roll-outs)."""
+        Q = np.asarray(Q, dtype=float)
+        N = len(Q)
+        if len(centers) == 0:
+            return np.full(N, np.inf), np.zeros((N, 2))
+        t1, t12 = Q[:, 0], Q[:, 0] + Q[:, 1]
+        u1 = np.stack([np.cos(t1), np.sin(t1)], -1)
+        u12 = np.stack([np.cos(t12), np.sin(t12)], -1)
+        elbow = self.arm.l1 * u1
+        ee = elbow + self.arm.l2 * u12
+        c = centers[None]                                                     # (1, S, 2)
+        best = np.full(N, np.inf)
+        grad = np.zeros((N, 2))
+        rows = np.arange(N)
+        for k, (a, b, L) in enumerate(((np.zeros_like(elbow), elbow, self.arm.l1), (elbow, ee, self.arm.l2))):
+            p, t = _closest_on_segments(a[:, None], b[:, None], c)             # (N, S, 2), (N, S)
+            d = np.linalg.norm(p - c, axis=-1) - radii[None] - self.arm.w      # (N, S)
+            s = np.argmin(d, axis=1)
+            dk = d[rows, s]
+            diff = p[rows, s] - centers[s]
+            u = diff / np.maximum(np.linalg.norm(diff, axis=1, keepdims=True), 1e-9)
+            arc = (t[rows, s] * L)[:, None]
+            perp1 = np.stack([-u1[:, 1], u1[:, 0]], -1)                        # d u1 / d t1
+            perp12 = np.stack([-u12[:, 1], u12[:, 0]], -1)
+            if k == 0:                                                         # J = [s perp1, 0]
+                gk = np.stack([(arc * perp1 * u).sum(1), np.zeros(N)], -1)
+            else:                                                              # J = [l1 perp1 + s perp12, s perp12]
+                col1 = arc * perp12
+                gk = np.stack([((self.arm.l1 * perp1 + col1) * u).sum(1), (col1 * u).sum(1)], -1)
+            closer = dk < best
+            best = np.where(closer, dk, best)
+            grad = np.where(closer[:, None], gk, grad)
+        return best, grad
+
     def gamma_grid(self, Q: np.ndarray, centers: np.ndarray, radii: np.ndarray) -> np.ndarray:
         """Vectorized Gamma for many configurations Q (N, 2) -> (N,) (for joint-space maps)."""
         if len(centers) == 0:
